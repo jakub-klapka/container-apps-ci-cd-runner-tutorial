@@ -1,16 +1,18 @@
-FROM ubuntu:24.04
+# Same base as your runner so the 'runner' user/group exist identically
+FROM ghcr.io/actions/actions-runner:2.304.0
 
+USER root
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Minimal deps: curl (HTTP), openssl (JWT signing), python3 (JSON parsing), ca-certificates (TLS roots)
+# Minimal deps used by init.sh
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    openssl \
-    python3 \
-    ca-certificates \
+      curl openssl python3 ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
-COPY github-actions-runner/init.sh ./init.sh
-RUN chmod +x ./init.sh
+# Copy your init script (LF endings; executable; has #!/usr/bin/env bash)
+COPY github-actions-runner/init.sh /init.sh
+RUN chmod +x /init.sh
 
-ENTRYPOINT ["./init.sh"]
+USER runner
+
+ENTRYPOINT ["/init.sh"]
