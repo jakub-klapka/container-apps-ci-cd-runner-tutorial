@@ -97,8 +97,6 @@ make_jwt() {
   printf '%s.%s\n' "$unsigned" "$sig"
 }
 
-mkdir -p "$HANDOFF_DIR"; chmod 700 "$HANDOFF_DIR"
-
 # 1) App JWT
 JWT="$(make_jwt)"
 
