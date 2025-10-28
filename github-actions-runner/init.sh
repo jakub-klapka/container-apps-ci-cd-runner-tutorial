@@ -172,7 +172,21 @@ umask 077
 printf '%s' "$REG_TOKEN" > "$HANDOFF_DIR/regtoken"
 echo "OK: wrote registration token to $HANDOFF_DIR/regtoken for runner '$RUNNER_NAME'."
 
-# in init script AFTER writing the file
-chmod 755 "$HANDOFF_DIR"
-chmod 644 "$HANDOFF_DIR/jit"       # or regtoken
+# choose the same ids your runner uses
+RUNNER_UID=${RUNNER_UID:-10001}
+RUNNER_GID=${RUNNER_GID:-10001}
+
+# hand off ownership
+chown "$RUNNER_UID:$RUNNER_GID" /mnt/reg-token-store
+chown "$RUNNER_UID:$RUNNER_GID" /mnt/reg-token-store/jit 2>/dev/null || true
+chown "$RUNNER_UID:$RUNNER_GID" /mnt/reg-token-store/regtoken 2>/dev/null || true
+
+# tight but readable/traversable: drwxr-x--- and -rw-r-----
+chmod 750 /mnt/reg-token-store
+[ -f /mnt/reg-token-store/jit ] && chmod 640 /mnt/reg-token-store/jit
+[ -f /mnt/reg-token-store/regtoken ] && chmod 640 /mnt/reg-token-store/regtoken
+
+# (temporary debug – prints only modes/owners, not contents)
+ls -ln /mnt /mnt/reg-token-store
+
 
