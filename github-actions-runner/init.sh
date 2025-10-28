@@ -63,21 +63,25 @@ resolve_key_path() {
     printf '%s\n' "$val"
     return
   fi
+
   # Otherwise treat it as inline PEM; normalize \r and '\n' sequences
   # Replace literal backslash-n with real newline; strip \r
   local pem
   pem="$(printf '%s' "$val" | sed 's/\\r//g; s/\\n/\n/g')"
-  # Quick sanity check
-  case "$pem" in
-    *"-----BEGIN "* "PRIVATE KEY"* "-----"*) : ;;
-    *) echo "ERROR: GITHUB_APP_PRIVATE_KEY_PEM is neither a readable file nor valid PEM content." >&2; exit 1;;
-  esac
+
+  # Quick sanity check: header must look like BEGIN ... PRIVATE KEY
+  if ! printf '%s' "$pem" | grep -q '^-----BEGIN .*PRIVATE KEY-----'; then
+    echo "ERROR: GITHUB_APP_PRIVATE_KEY_PEM is neither a readable file nor valid PEM content." >&2
+    exit 1
+  fi
+
   KEY_TMP="$(mktemp)"
   chmod 600 "$KEY_TMP"
   # Ensure trailing newline so OpenSSL is happy
   printf '%s\n' "$pem" > "$KEY_TMP"
   printf '%s\n' "$KEY_TMP"
 }
+
 
 KEY_PATH="$(resolve_key_path "$GITHUB_APP_PRIVATE_KEY_PEM")"
 
