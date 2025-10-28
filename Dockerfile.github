@@ -13,7 +13,6 @@ RUN curl -sL https://aka.ms/InstallAzureCLIDeb | bash
 COPY github-actions-runner/entrypoint.sh ./entrypoint.sh
 RUN chmod +x ./entrypoint.sh
 
-RUN groupadd -g 10001 ghrunner && useradd -u 10001 -g 10001 -M -s /usr/sbin/nologin ghrunner
-USER 10001:10001
+USER runner
 
 ENTRYPOINT ["./entrypoint.sh"]
