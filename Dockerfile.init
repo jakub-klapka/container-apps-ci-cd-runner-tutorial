@@ -1,8 +1,14 @@
-FROM ubuntu:latest
+FROM ubuntu:24.04
 
-RUN apt-get update && apt-get install -y curl && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Minimal deps: curl (HTTP), openssl (JWT signing), python3 (JSON parsing), ca-certificates (TLS roots)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    openssl \
+    python3 \
+    ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
 
 COPY github-actions-runner/init.sh ./init.sh
 RUN chmod +x ./init.sh
