@@ -172,16 +172,4 @@ umask 077
 printf '%s' "$REG_TOKEN" > "$HANDOFF_DIR/regtoken"
 echo "OK: wrote registration token to $HANDOFF_DIR/regtoken for runner '$RUNNER_NAME'."
 
-# Make the handoff readable by any user in the replica
-HANDOFF_DIR="${HANDOFF_DIR:-/mnt/reg-token-store}"
 
-# ensure parent dirs are traversable
-chmod 755 /mnt || true
-
-# dir must be traversable; files readable
-chmod 755 "$HANDOFF_DIR"
-[ -f "$HANDOFF_DIR/jit" ] && chmod 644 "$HANDOFF_DIR/jit"
-[ -f "$HANDOFF_DIR/regtoken" ] && chmod 644 "$HANDOFF_DIR/regtoken"
-
-# (optional) quick listing for sanity (no contents shown)
-ls -ld "$HANDOFF_DIR"; ls -l "$HANDOFF_DIR"
