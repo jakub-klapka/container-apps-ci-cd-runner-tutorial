@@ -13,6 +13,4 @@ RUN curl -sL https://aka.ms/InstallAzureCLIDeb | bash
 COPY github-actions-runner/entrypoint.sh ./entrypoint.sh
 RUN chmod +x ./entrypoint.sh
 
-USER runner
-
 ENTRYPOINT ["./entrypoint.sh"]
