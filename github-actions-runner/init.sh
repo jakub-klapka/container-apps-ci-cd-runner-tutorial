@@ -172,21 +172,16 @@ umask 077
 printf '%s' "$REG_TOKEN" > "$HANDOFF_DIR/regtoken"
 echo "OK: wrote registration token to $HANDOFF_DIR/regtoken for runner '$RUNNER_NAME'."
 
-# choose the same ids your runner uses
-RUNNER_UID=${RUNNER_UID:-10001}
-RUNNER_GID=${RUNNER_GID:-10001}
+# Make the handoff readable by any user in the replica
+HANDOFF_DIR="${HANDOFF_DIR:-/mnt/reg-token-store}"
 
-# hand off ownership
-chown "$RUNNER_UID:$RUNNER_GID" /mnt/reg-token-store
-chown "$RUNNER_UID:$RUNNER_GID" /mnt/reg-token-store/jit 2>/dev/null || true
-chown "$RUNNER_UID:$RUNNER_GID" /mnt/reg-token-store/regtoken 2>/dev/null || true
+# ensure parent dirs are traversable
+chmod 755 /mnt || true
 
-# tight but readable/traversable: drwxr-x--- and -rw-r-----
-chmod 750 /mnt/reg-token-store
-[ -f /mnt/reg-token-store/jit ] && chmod 640 /mnt/reg-token-store/jit
-[ -f /mnt/reg-token-store/regtoken ] && chmod 640 /mnt/reg-token-store/regtoken
+# dir must be traversable; files readable
+chmod 755 "$HANDOFF_DIR"
+[ -f "$HANDOFF_DIR/jit" ] && chmod 644 "$HANDOFF_DIR/jit"
+[ -f "$HANDOFF_DIR/regtoken" ] && chmod 644 "$HANDOFF_DIR/regtoken"
 
-# (temporary debug – prints only modes/owners, not contents)
-ls -ln /mnt /mnt/reg-token-store
-
-
+# (optional) quick listing for sanity (no contents shown)
+ls -ld "$HANDOFF_DIR"; ls -l "$HANDOFF_DIR"
