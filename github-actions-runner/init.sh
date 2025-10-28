@@ -171,3 +171,8 @@ REG_TOKEN="$(
 umask 077
 printf '%s' "$REG_TOKEN" > "$HANDOFF_DIR/regtoken"
 echo "OK: wrote registration token to $HANDOFF_DIR/regtoken for runner '$RUNNER_NAME'."
+
+# in init script AFTER writing the file
+chmod 755 "$HANDOFF_DIR"
+chmod 644 "$HANDOFF_DIR/jit"       # or regtoken
+
