@@ -1,5 +1,5 @@
 # Same base as your runner so the 'runner' user/group exist identically
-FROM ghcr.io/actions/actions-runner:2.304.0
+FROM ghcr.io/actions/actions-runner:2.329.0
 
 USER root
 ENV DEBIAN_FRONTEND=noninteractive
