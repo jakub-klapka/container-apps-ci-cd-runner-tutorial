@@ -26,8 +26,7 @@ trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; printf '%s' "${s%"${s##*[
 json_get() {
   local key="$1"
   if have_python; then
-    # First try Py3.12+ compact dump, then fallback for older versions
-    python3 - <<'PY' "$key" 2>/dev/null || python3 - <<'PY' "$key"
+    python3 - "$key" <<'PY'
 import sys, json
 k = sys.argv[1]
 d = json.load(sys.stdin)
