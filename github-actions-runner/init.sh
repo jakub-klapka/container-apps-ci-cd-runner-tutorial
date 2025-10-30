@@ -26,17 +26,23 @@ trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; printf '%s' "${s%"${s##*[
 json_get() {
   local key="$1"
   if have_python; then
-    python3 - "$key" <<'PY'
-import sys, json
+    python3 -c "import sys, json
 k = sys.argv[1]
-d = json.load(sys.stdin)
-v = d.get(k, "")
+input_data = sys.stdin.read()
+if not input_data or not input_data.strip():
+    print(f'ERROR: Empty response from API call. Check your credentials and API endpoint.', file=sys.stderr)
+    sys.exit(2)
 try:
-    print(v if not isinstance(v, (dict, list)) else json.dumps(v, separators=(",",":")))
+    d = json.loads(input_data)
+except json.JSONDecodeError as e:
+    print(f'ERROR: Invalid JSON response: {e}', file=sys.stderr)
+    print(f'Received: {input_data[:200]}', file=sys.stderr)
+    sys.exit(2)
+v = d.get(k, '')
+try:
+    print(v if not isinstance(v, (dict, list)) else json.dumps(v, separators=(',',':')))
 except Exception:
-    import json as J
-    print(v if not isinstance(v, (dict, list)) else J.dumps(v, separators=(",",":")))
-PY
+    print(v if not isinstance(v, (dict, list)) else json.dumps(v, separators=(',',':')))" "$key"
   else
     echo "ERROR: python3 not found; cannot parse JSON." >&2
     exit 2
@@ -132,7 +138,11 @@ else
   )"
 fi
 
-[ -n "$INSTALL_TOKEN" ] || { echo "Failed to obtain auth token"; exit 1; }
+if [ -z "$INSTALL_TOKEN" ]; then
+  echo "ERROR: Failed to obtain auth token" >&2
+  echo "Check your GITHUB_PAT or GitHub App credentials (GITHUB_APP_ID, GITHUB_INSTALLATION_ID, GITHUB_APP_PRIVATE_KEY_PEM)" >&2
+  exit 1
+fi
 auth_hdr=(-H "Accept: application/vnd.github+json" -H "Authorization: Bearer $INSTALL_TOKEN" -H "X-GitHub-Api-Version: $API_VERSION")
 
 # ---------- If no group provided, use classic org registration token (Default group) ----------
