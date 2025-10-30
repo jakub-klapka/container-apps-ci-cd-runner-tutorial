@@ -1,39 +1,45 @@
 #!/usr/bin/env bash
 # Mint JIT runner config (preferred) or classic registration token for an org runner
-# Deps: bash, curl, openssl. Optional: python3 (only for resolving runner group by NAME and JSON field extraction).
+# Deps: bash, curl, openssl. Optional: python3 (for JSON parsing / group name lookup).
 set -euo pipefail
 set -x
 
 # -------- Inputs --------
 : "${GITHUB_ORG:?missing GITHUB_ORG (org login)}"
-# PAT is optional; if absent we use GitHub App creds
-GITHUB_PAT="${GITHUB_PAT:-}"
+GITHUB_PAT="${GITHUB_PAT:-}"                         # optional; if set we use PAT mode
 
-RUNNER_GROUP_NAME="${RUNNER_GROUP_NAME:-}"     # optional if RUNNER_GROUP_ID provided
-RUNNER_GROUP_ID="${RUNNER_GROUP_ID:-}"         # recommended to set explicitly
+RUNNER_GROUP_NAME="${RUNNER_GROUP_NAME:-}"           # optional if RUNNER_GROUP_ID provided
+RUNNER_GROUP_ID="${RUNNER_GROUP_ID:-}"               # recommended to set explicitly for JIT
 RUNNER_NAME="${RUNNER_NAME:-jit-$(hostname)-$RANDOM}"
-RUNNER_LABELS_JSON='["rbcz-azure"]'            # your requested label
+RUNNER_LABELS_JSON='["rbcz-azure"]'                  # your requested label
 HANDOFF_DIR="${HANDOFF_DIR:-/handoff}"
 
 API="https://api.github.com"
 API_VERSION="2022-11-28"
 
-# Decide auth mode
-USE_PAT=false
-if [ -n "$GITHUB_PAT" ]; then
-  USE_PAT=true
-fi
-
 # -------- Helpers --------
 have_python() { command -v python3 >/dev/null 2>&1; }
+
+# Trim helper (so spaces-only PAT is treated as empty)
+trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; printf '%s' "${s%"${s##*[![:space:]]}"}"; }
 
 json_get() {
   local key="$1"
   if have_python; then
-    python3 -c 'import sys,json; k=sys.argv[1]; d=json.load(sys.stdin); v=d.get(k,""); print(v if not isinstance(v,(dict,list)) else json.dumps(v,seps:=(",",":")))' "$key" 2>/dev/null \
-    || python3 -c 'import sys,json; k=sys.argv[1]; d=json.load(sys.stdin); v=d.get(k,""); import json as J; print(v if not isinstance(v,(dict,list)) else J.dumps(v,separators=(",",":")))' "$key"
+    # First try Py3.12+ compact dump, then fallback for older versions
+    python3 - <<'PY' "$key" 2>/dev/null || python3 - <<'PY' "$key"
+import sys, json
+k = sys.argv[1]
+d = json.load(sys.stdin)
+v = d.get(k, "")
+try:
+    print(v if not isinstance(v, (dict, list)) else json.dumps(v, separators=(",",":")))
+except Exception:
+    import json as J
+    print(v if not isinstance(v, (dict, list)) else J.dumps(v, separators=(",",":")))
+PY
   else
-    echo "ERROR: python3 not found; cannot parse JSON. Install python3." >&2
+    echo "ERROR: python3 not found; cannot parse JSON." >&2
     exit 2
   fi
 }
@@ -44,16 +50,21 @@ find_group_id_by_name() {
     echo "ERROR: python3 required to resolve runner group by name; set RUNNER_GROUP_ID instead." >&2
     exit 2
   fi
-  python3 -c 'import sys,json; name=sys.argv[1]; data=json.load(sys.stdin)
-for g in data.get("runner_groups",[]):
-  if g.get("name")==name:
-    print(g.get("id")); sys.exit(0)
-sys.exit(3)' "$name"
+  python3 - "$name" <<'PY'
+import sys, json
+name = sys.argv[1]
+data = json.load(sys.stdin)
+for g in data.get("runner_groups", []):
+    if g.get("name") == name:
+        print(g.get("id"))
+        sys.exit(0)
+sys.exit(3)
+PY
 }
 
 b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
 
-# Accept GITHUB_APP_PRIVATE_KEY_PEM as a path or inline PEM (used only in App mode)
+# Accept GITHUB_APP_PRIVATE_KEY_PEM as a path or inline PEM (App mode only)
 KEY_TMP=""
 cleanup_key() {
   if [ -n "$KEY_TMP" ]; then
@@ -64,15 +75,14 @@ trap cleanup_key EXIT
 
 resolve_key_path() {
   local val="$1"
-  # If it's a readable file path, use it directly
+  # File path
   if [ -f "$val" ]; then
     printf '%s\n' "$val"
     return
   fi
-  # Otherwise treat it as inline PEM; normalize \r and '\n' sequences
+  # Inline PEM: normalize \r and literal \n
   local pem
   pem="$(printf '%s' "$val" | sed 's/\\r//g; s/\\n/\n/g')"
-  # Quick sanity check: header must look like BEGIN ... PRIVATE KEY
   if ! printf '%s' "$pem" | grep -q '^-----BEGIN .*PRIVATE KEY-----'; then
     echo "ERROR: GITHUB_APP_PRIVATE_KEY_PEM is neither a readable file nor valid PEM content." >&2
     exit 1
@@ -96,20 +106,23 @@ make_jwt_with_key() {
   printf '%s.%s\n' "$unsigned" "$sig"
 }
 
-mkdir -p "$HANDOFF_DIR"; chmod 700 "$HANDOFF_DIR"
+# ---------- Auth mode: PAT or GitHub App ----------
+USE_PAT=false
+if [ -n "$(trim "${GITHUB_PAT}")" ]; then
+  USE_PAT=true
+fi
 
-# ---------- Auth: PAT or GitHub App ----------
 if $USE_PAT; then
-  INSTALL_TOKEN="$GITHUB_PAT"
+  INSTALL_TOKEN="$(trim "${GITHUB_PAT}")"
+  # Ensure nothing later tries to touch App credentials
+  unset GITHUB_APP_ID GITHUB_INSTALLATION_ID GITHUB_APP_PRIVATE_KEY_PEM GITHUB_APP_KEY_PASSPHRASE || true
 else
-  # Validate required App inputs only in App mode
+  # App mode requires these:
   : "${GITHUB_APP_ID:?missing GITHUB_APP_ID (App ID integer)}"
   : "${GITHUB_INSTALLATION_ID:?missing GITHUB_INSTALLATION_ID}"
   : "${GITHUB_APP_PRIVATE_KEY_PEM:?missing GITHUB_APP_PRIVATE_KEY_PEM (path OR inline PEM)}"
-
   KEY_PATH="$(resolve_key_path "$GITHUB_APP_PRIVATE_KEY_PEM")"
   JWT="$(make_jwt_with_key "$KEY_PATH")"
-
   INSTALL_TOKEN="$(
     curl -fsSL -X POST \
       -H "Accept: application/vnd.github+json" \
@@ -119,14 +132,11 @@ else
     | json_get token
   )"
 fi
-[ -n "$INSTALL_TOKEN" ] || { echo "Failed to obtain auth token"; exit 1; }
 
+[ -n "$INSTALL_TOKEN" ] || { echo "Failed to obtain auth token"; exit 1; }
 auth_hdr=(-H "Accept: application/vnd.github+json" -H "Authorization: Bearer $INSTALL_TOKEN" -H "X-GitHub-Api-Version: $API_VERSION")
 
-# ---------- Paths based on provided group / auth mode ----------
-# If NO group provided (neither ID nor NAME):
-#   - With PAT: go straight to classic org registration token (lands in Default group).
-#   - With App: keep your previous behavior (also classic org token when no group was provided).
+# ---------- If no group provided, use classic org registration token (Default group) ----------
 if [ -z "${RUNNER_GROUP_ID:-}" ] && [ -z "${RUNNER_GROUP_NAME:-}" ]; then
   REG_TOKEN="$(
     curl -fsSL -X POST "${auth_hdr[@]}" \
@@ -136,11 +146,14 @@ if [ -z "${RUNNER_GROUP_ID:-}" ] && [ -z "${RUNNER_GROUP_NAME:-}" ]; then
   [ -n "$REG_TOKEN" ]
   umask 077
   printf '%s' "$REG_TOKEN" > "$HANDOFF_DIR/regtoken"
+  # Make sure the runner user can read it inside ACA (world-readable in the replica)
+  chmod 755 "$HANDOFF_DIR" || true
+  chmod 644 "$HANDOFF_DIR/regtoken" || true
   echo "OK: wrote org reg token to $HANDOFF_DIR/regtoken (Default runner group)."
   exit 0
 fi
 
-# Resolve runner group if only NAME provided (works in both PAT and App modes)
+# ---------- Resolve runner group if a NAME was provided ----------
 if [ -z "${RUNNER_GROUP_ID:-}" ] && [ -n "${RUNNER_GROUP_NAME:-}" ]; then
   RUNNER_GROUP_ID="$(
     curl -fsSL "${auth_hdr[@]}" "$API/orgs/$GITHUB_ORG/actions/runner-groups" \
@@ -153,7 +166,7 @@ if [ -z "${RUNNER_GROUP_ID:-}" ]; then
   exit 1
 fi
 
-# ---------- Try JIT (works best with App; may work with fine-grained PAT if allowed) ----------
+# ---------- Try JIT (single-use, preferred) ----------
 JIT_BODY=$(printf '{"name":"%s","runner_group_id":%s,"labels":%s,"work_folder":"_work"}' \
                   "$RUNNER_NAME" "$RUNNER_GROUP_ID" "$RUNNER_LABELS_JSON")
 
@@ -170,6 +183,9 @@ if [ $rc -eq 0 ]; then
   [ -n "$ENCODED_JIT" ]
   umask 077
   printf '%s' "$ENCODED_JIT" > "$HANDOFF_DIR/jit"
+  # Ensure runner user can read it from the shared EmptyDir
+  chmod 755 "$HANDOFF_DIR" || true
+  chmod 644 "$HANDOFF_DIR/jit" || true
   echo "OK: wrote JIT config to $HANDOFF_DIR/jit for runner '$RUNNER_NAME' (labels: $RUNNER_LABELS_JSON)."
   exit 0
 fi
@@ -184,4 +200,6 @@ REG_TOKEN="$(
 [ -n "$REG_TOKEN" ]
 umask 077
 printf '%s' "$REG_TOKEN" > "$HANDOFF_DIR/regtoken"
+chmod 755 "$HANDOFF_DIR" || true
+chmod 644 "$HANDOFF_DIR/regtoken" || true
 echo "OK: wrote registration token to $HANDOFF_DIR/regtoken for runner '$RUNNER_NAME'."
