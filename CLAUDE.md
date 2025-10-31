@@ -37,7 +37,7 @@ See the [official tutorial](https://learn.microsoft.com/azure/container-apps/tut
   - Environment variables:
     - Required: `GITHUB_ORG` (organization login)
     - Auth mode: `GITHUB_PAT` (Personal Access Token) or `GITHUB_APP_ID` + `GITHUB_INSTALLATION_ID` + `GITHUB_APP_PRIVATE_KEY_PEM`
-    - Optional: `RUNNER_GROUP_ID` (defaults to 1), `RUNNER_GROUP_NAME`, `RUNNER_NAME`, `RUNNER_LABELS_JSON`, `HANDOFF_DIR`
+    - Optional: `RUNNER_GROUP_ID` (defaults to 1), `RUNNER_GROUP_NAME`, `RUNNER_NAME`, `RUNNER_LABELS_JSON`, `HANDOFF_DIR`, `API` (defaults to https://api.github.com)
   - Default label: `["rbcz-azure"]` (hardcoded)
 
 - **`entrypoint.sh`** - Runner startup script

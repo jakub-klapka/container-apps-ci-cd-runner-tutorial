@@ -13,8 +13,7 @@ RUNNER_GROUP_ID="${RUNNER_GROUP_ID:-}"               # recommended to set explic
 RUNNER_NAME="${RUNNER_NAME:-jit-$(hostname)-$RANDOM}"
 RUNNER_LABELS_JSON='["rbcz-azure"]'                  # your requested label
 HANDOFF_DIR="${HANDOFF_DIR:-/handoff}"
-
-API="https://api.github.com"
+API="${API:-https://api.github.com}"
 API_VERSION="2022-11-28"
 
 # -------- Helpers --------
