@@ -76,6 +76,28 @@ Both modes generate JIT config exclusively - no fallback to classic registration
 - **Repository-level** (when `GITHUB_REPOSITORY` is set): Runners appear in repo settings, use default group (ID: 1)
 - Priority: `GITHUB_ORG` takes precedence if both are set
 
+### Recommended Configuration for Azure Container Apps
+
+**⚠️ Important: Use organization-level registration with ACA**
+
+When deploying with Azure Container Apps and KEDA's GitHub Runner scaler:
+
+1. **Set `GITHUB_ORG` explicitly** - KEDA cannot auto-populate `GITHUB_REPOSITORY` from triggering workflows
+2. **Omit or ignore `GITHUB_REPOSITORY`** - While the scaler may set this variable, it won't contain the triggering repo
+3. **Use runner groups** - Set `RUNNER_GROUP_ID` to organize runners (defaults to 1 if omitted)
+
+**Why org-level?**
+- KEDA scalers only determine *when* to scale, not *what* metadata to pass to containers
+- Repository information from triggering workflows is not available to init containers
+- Org-level runners can service any repository in your organization
+
+**When is repo-level appropriate?**
+- Manual deployments where you hardcode `GITHUB_REPOSITORY` in your job config
+- Single-repository setups with static configuration
+- Testing and development environments
+
+See `ARCHITECTURE.md` for detailed technical explanation of KEDA scaler limitations.
+
 ## Building Images on Azure Container Registry
 
 **Current version: 16.0** (increment by 1 for each build)
