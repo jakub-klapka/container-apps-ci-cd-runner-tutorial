@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Generate JIT runner configuration for GitHub Actions organization-level runners
+# Mint JIT runner config (preferred) or classic registration token for an org runner
 # Deps: bash, curl, openssl. Optional: python3 (for JSON parsing / group name lookup).
 set -euo pipefail
 set -x
@@ -25,14 +25,10 @@ trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; printf '%s' "${s%"${s##*[
 
 json_get() {
   local key="$1"
-  local json_data
-  # Read stdin into variable before heredoc takes over stdin
-  json_data="$(cat)"
   if have_python; then
-    python3 - "$key" "$json_data" <<'PY'
-import sys, json
+    python3 -c "import sys, json
 k = sys.argv[1]
-input_data = sys.argv[2] if len(sys.argv) > 2 else ""
+input_data = sys.stdin.read()
 if not input_data or not input_data.strip():
     print(f'ERROR: Empty response from API call. Check your credentials and API endpoint.', file=sys.stderr)
     sys.exit(2)
@@ -43,8 +39,10 @@ except json.JSONDecodeError as e:
     print(f'Received: {input_data[:200]}', file=sys.stderr)
     sys.exit(2)
 v = d.get(k, '')
-print(v if not isinstance(v, (dict, list)) else json.dumps(v, separators=(',',':')))
-PY
+try:
+    print(v if not isinstance(v, (dict, list)) else json.dumps(v, separators=(',',':')))
+except Exception:
+    print(v if not isinstance(v, (dict, list)) else json.dumps(v, separators=(',',':')))" "$key"
   else
     echo "ERROR: python3 not found; cannot parse JSON." >&2
     exit 2
@@ -147,29 +145,37 @@ if [ -z "$INSTALL_TOKEN" ]; then
 fi
 auth_hdr=(-H "Accept: application/vnd.github+json" -H "Authorization: Bearer $INSTALL_TOKEN" -H "X-GitHub-Api-Version: $API_VERSION")
 
-echo "INFO: Using organization-level runner registration for $GITHUB_ORG"
-
-# ---------- Determine runner group ID ----------
+# ---------- If no group provided, use classic org registration token (Default group) ----------
 if [ -z "${RUNNER_GROUP_ID:-}" ] && [ -z "${RUNNER_GROUP_NAME:-}" ]; then
-  # Default to group 1 if not specified
-  RUNNER_GROUP_ID=1
-  echo "INFO: Using default runner group (ID: 1)"
-elif [ -z "${RUNNER_GROUP_ID:-}" ] && [ -n "${RUNNER_GROUP_NAME:-}" ]; then
-  # Resolve by name
-  RUNNER_GROUP_ID="$(
-    curl -fsSL "${auth_hdr[@]}" "$API/orgs/$GITHUB_ORG/actions/runner-groups" \
-    | find_group_id_by_name "$RUNNER_GROUP_NAME"
+  REG_TOKEN="$(
+    curl -fsSL -X POST "${auth_hdr[@]}" \
+      "$API/orgs/$GITHUB_ORG/actions/runners/registration-token" \
+    | json_get token
   )"
-  if [ -z "${RUNNER_GROUP_ID:-}" ]; then
-    echo "ERROR: Could not find runner group named '$RUNNER_GROUP_NAME'" >&2
-    exit 1
-  fi
-  echo "INFO: Resolved runner group '$RUNNER_GROUP_NAME' to ID: $RUNNER_GROUP_ID"
-else
-  echo "INFO: Using runner group ID: $RUNNER_GROUP_ID"
+  [ -n "$REG_TOKEN" ]
+  umask 077
+  printf '%s' "$REG_TOKEN" > "$HANDOFF_DIR/regtoken"
+  # Make sure the runner user can read it inside ACA (world-readable in the replica)
+  chmod 755 "$HANDOFF_DIR" || true
+  chmod 644 "$HANDOFF_DIR/regtoken" || true
+  echo "OK: wrote org reg token to $HANDOFF_DIR/regtoken (Default runner group)."
+  exit 0
 fi
 
-# ---------- Generate JIT config ----------
+# ---------- Resolve runner group if a NAME was provided ----------
+if [ -z "${RUNNER_GROUP_ID:-}" ] && [ -n "${RUNNER_GROUP_NAME:-}" ]; then
+  RUNNER_GROUP_ID="$(
+    curl -fsSL "${auth_hdr[@]}" "$API/orgs/$GITHUB_ORG/actions/runner-groups" \
+    | find_group_id_by_name "$RUNNER_GROUP_NAME" || true
+  )"
+fi
+
+if [ -z "${RUNNER_GROUP_ID:-}" ]; then
+  echo "ERROR: Provide RUNNER_GROUP_ID or a valid RUNNER_GROUP_NAME (requires python3), or leave both empty to use classic org token." >&2
+  exit 1
+fi
+
+# ---------- Try JIT (single-use, preferred) ----------
 JIT_BODY=$(printf '{"name":"%s","runner_group_id":%s,"labels":%s,"work_folder":"_work"}' \
                   "$RUNNER_NAME" "$RUNNER_GROUP_ID" "$RUNNER_LABELS_JSON")
 
