@@ -4,6 +4,9 @@
 set -euo pipefail
 set -x
 
+# DEBUG
+printenv
+
 # -------- Inputs --------
 GITHUB_ORG="${GITHUB_ORG:-}"                         # org login (for org-level runners)
 GITHUB_REPOSITORY="${GITHUB_REPOSITORY:-}"           # auto-set by ACA scaler (format: owner/repo)
