@@ -5,11 +5,26 @@ set -euo pipefail
 set -x
 
 # -------- Inputs --------
-: "${GITHUB_ORG:?missing GITHUB_ORG (org login)}"
+GITHUB_ORG="${GITHUB_ORG:-}"                         # org login (for org-level runners)
+GITHUB_REPOSITORY="${GITHUB_REPOSITORY:-}"           # auto-set by ACA scaler (format: owner/repo)
 GITHUB_PAT="${GITHUB_PAT:-}"                         # optional; if set we use PAT mode
 
-RUNNER_GROUP_NAME="${RUNNER_GROUP_NAME:-}"           # optional if RUNNER_GROUP_ID provided
-RUNNER_GROUP_ID="${RUNNER_GROUP_ID:-}"               # recommended to set explicitly for JIT
+# Determine scope: org-level if GITHUB_ORG is set, otherwise repo-level
+if [ -n "$GITHUB_ORG" ]; then
+  SCOPE="org"
+  SCOPE_PATH="orgs/$GITHUB_ORG"
+  echo "INFO: Using organization-level runner registration for $GITHUB_ORG"
+elif [ -n "$GITHUB_REPOSITORY" ]; then
+  SCOPE="repo"
+  SCOPE_PATH="repos/$GITHUB_REPOSITORY"
+  echo "INFO: Using repository-level runner registration for $GITHUB_REPOSITORY"
+else
+  echo "ERROR: Either GITHUB_ORG or GITHUB_REPOSITORY must be set" >&2
+  exit 1
+fi
+
+RUNNER_GROUP_NAME="${RUNNER_GROUP_NAME:-}"           # optional if RUNNER_GROUP_ID provided (org-level only)
+RUNNER_GROUP_ID="${RUNNER_GROUP_ID:-}"               # recommended to set explicitly for JIT (org-level only)
 RUNNER_NAME="${RUNNER_NAME:-jit-$(hostname)-$RANDOM}"
 RUNNER_LABELS_JSON='["rbcz-azure"]'                  # your requested label
 HANDOFF_DIR="${HANDOFF_DIR:-/handoff}"
@@ -145,27 +160,68 @@ if [ -z "$INSTALL_TOKEN" ]; then
 fi
 auth_hdr=(-H "Accept: application/vnd.github+json" -H "Authorization: Bearer $INSTALL_TOKEN" -H "X-GitHub-Api-Version: $API_VERSION")
 
-# ---------- If no group provided, use classic org registration token (Default group) ----------
-if [ -z "${RUNNER_GROUP_ID:-}" ] && [ -z "${RUNNER_GROUP_NAME:-}" ]; then
+# ---------- For repo-level runners: skip to JIT (no runner groups) ----------
+if [ "$SCOPE" = "repo" ]; then
+  # Repo-level runners don't support runner groups, go straight to JIT
+  JIT_BODY=$(printf '{"name":"%s","labels":%s,"work_folder":"_work"}' \
+                    "$RUNNER_NAME" "$RUNNER_LABELS_JSON")
+
+  set +e
+  JIT_RESP="$(
+    curl -fsS -X POST "${auth_hdr[@]}" -d "$JIT_BODY" \
+      "$API/$SCOPE_PATH/actions/runners/generate-jitconfig"
+  )"
+  rc=$?
+  set -e
+
+  if [ $rc -eq 0 ]; then
+    ENCODED_JIT="$(printf '%s' "$JIT_RESP" | json_get encoded_jit_config)"
+    [ -n "$ENCODED_JIT" ]
+    umask 077
+    printf '%s' "$ENCODED_JIT" > "$HANDOFF_DIR/jit"
+    chmod 755 "$HANDOFF_DIR" || true
+    chmod 644 "$HANDOFF_DIR/jit" || true
+    echo "OK: wrote JIT config to $HANDOFF_DIR/jit for runner '$RUNNER_NAME' (labels: $RUNNER_LABELS_JSON)."
+    exit 0
+  fi
+
+  # Fallback to classic registration token for repo
+  echo "WARN: JIT config failed; falling back to classic registration token…" >&2
   REG_TOKEN="$(
     curl -fsSL -X POST "${auth_hdr[@]}" \
-      "$API/orgs/$GITHUB_ORG/actions/runners/registration-token" \
+      "$API/$SCOPE_PATH/actions/runners/registration-token" \
     | json_get token
   )"
   [ -n "$REG_TOKEN" ]
   umask 077
   printf '%s' "$REG_TOKEN" > "$HANDOFF_DIR/regtoken"
-  # Make sure the runner user can read it inside ACA (world-readable in the replica)
+  chmod 755 "$HANDOFF_DIR" || true
+  chmod 644 "$HANDOFF_DIR/regtoken" || true
+  echo "OK: wrote registration token to $HANDOFF_DIR/regtoken for runner '$RUNNER_NAME'."
+  exit 0
+fi
+
+# ---------- Org-level runners: handle runner groups ----------
+# If no group provided, use classic org registration token (Default group)
+if [ -z "${RUNNER_GROUP_ID:-}" ] && [ -z "${RUNNER_GROUP_NAME:-}" ]; then
+  REG_TOKEN="$(
+    curl -fsSL -X POST "${auth_hdr[@]}" \
+      "$API/$SCOPE_PATH/actions/runners/registration-token" \
+    | json_get token
+  )"
+  [ -n "$REG_TOKEN" ]
+  umask 077
+  printf '%s' "$REG_TOKEN" > "$HANDOFF_DIR/regtoken"
   chmod 755 "$HANDOFF_DIR" || true
   chmod 644 "$HANDOFF_DIR/regtoken" || true
   echo "OK: wrote org reg token to $HANDOFF_DIR/regtoken (Default runner group)."
   exit 0
 fi
 
-# ---------- Resolve runner group if a NAME was provided ----------
+# Resolve runner group if a NAME was provided
 if [ -z "${RUNNER_GROUP_ID:-}" ] && [ -n "${RUNNER_GROUP_NAME:-}" ]; then
   RUNNER_GROUP_ID="$(
-    curl -fsSL "${auth_hdr[@]}" "$API/orgs/$GITHUB_ORG/actions/runner-groups" \
+    curl -fsSL "${auth_hdr[@]}" "$API/$SCOPE_PATH/actions/runner-groups" \
     | find_group_id_by_name "$RUNNER_GROUP_NAME" || true
   )"
 fi
@@ -175,14 +231,14 @@ if [ -z "${RUNNER_GROUP_ID:-}" ]; then
   exit 1
 fi
 
-# ---------- Try JIT (single-use, preferred) ----------
+# Try JIT (single-use, preferred) for org-level with runner group
 JIT_BODY=$(printf '{"name":"%s","runner_group_id":%s,"labels":%s,"work_folder":"_work"}' \
                   "$RUNNER_NAME" "$RUNNER_GROUP_ID" "$RUNNER_LABELS_JSON")
 
 set +e
 JIT_RESP="$(
   curl -fsS -X POST "${auth_hdr[@]}" -d "$JIT_BODY" \
-    "$API/orgs/$GITHUB_ORG/actions/runners/generate-jitconfig"
+    "$API/$SCOPE_PATH/actions/runners/generate-jitconfig"
 )"
 rc=$?
 set -e
@@ -203,7 +259,7 @@ fi
 echo "WARN: JIT config failed; falling back to classic registration token…" >&2
 REG_TOKEN="$(
   curl -fsSL -X POST "${auth_hdr[@]}" \
-    "$API/orgs/$GITHUB_ORG/actions/runners/registration-token" \
+    "$API/$SCOPE_PATH/actions/runners/registration-token" \
   | json_get token
 )"
 [ -n "$REG_TOKEN" ]
