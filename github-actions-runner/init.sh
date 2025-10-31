@@ -183,6 +183,4 @@ ENCODED_JIT="$(printf '%s' "$JIT_RESP" | json_get encoded_jit_config)"
 
 umask 077
 printf '%s' "$ENCODED_JIT" > "$HANDOFF_DIR/jit"
-chmod 755 "$HANDOFF_DIR" || true
-chmod 644 "$HANDOFF_DIR/jit" || true
 echo "OK: wrote JIT config to $HANDOFF_DIR/jit for runner '$RUNNER_NAME' in group $RUNNER_GROUP_ID (labels: $RUNNER_LABELS_JSON)."
