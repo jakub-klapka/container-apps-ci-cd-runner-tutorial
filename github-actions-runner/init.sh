@@ -160,111 +160,44 @@ if [ -z "$INSTALL_TOKEN" ]; then
 fi
 auth_hdr=(-H "Accept: application/vnd.github+json" -H "Authorization: Bearer $INSTALL_TOKEN" -H "X-GitHub-Api-Version: $API_VERSION")
 
-# ---------- For repo-level runners: skip to JIT (no runner groups) ----------
+# ---------- Determine runner group ID ----------
 if [ "$SCOPE" = "repo" ]; then
-  # Repo-level runners don't support runner groups, go straight to JIT
-  JIT_BODY=$(printf '{"name":"%s","labels":%s,"work_folder":"_work"}' \
-                    "$RUNNER_NAME" "$RUNNER_LABELS_JSON")
-
-  set +e
-  JIT_RESP="$(
-    curl -fsS -X POST "${auth_hdr[@]}" -d "$JIT_BODY" \
-      "$API/$SCOPE_PATH/actions/runners/generate-jitconfig"
-  )"
-  rc=$?
-  set -e
-
-  if [ $rc -eq 0 ]; then
-    ENCODED_JIT="$(printf '%s' "$JIT_RESP" | json_get encoded_jit_config)"
-    [ -n "$ENCODED_JIT" ]
-    umask 077
-    printf '%s' "$ENCODED_JIT" > "$HANDOFF_DIR/jit"
-    chmod 755 "$HANDOFF_DIR" || true
-    chmod 644 "$HANDOFF_DIR/jit" || true
-    echo "OK: wrote JIT config to $HANDOFF_DIR/jit for runner '$RUNNER_NAME' (labels: $RUNNER_LABELS_JSON)."
-    exit 0
+  # Repo-level runners use default group (ID: 1)
+  RUNNER_GROUP_ID=1
+  echo "INFO: Using default runner group (ID: 1) for repository-level runner"
+else
+  # Org-level: resolve runner group
+  if [ -z "${RUNNER_GROUP_ID:-}" ] && [ -z "${RUNNER_GROUP_NAME:-}" ]; then
+    # Default to group 1 if not specified
+    RUNNER_GROUP_ID=1
+    echo "INFO: Using default runner group (ID: 1) for organization"
+  elif [ -z "${RUNNER_GROUP_ID:-}" ] && [ -n "${RUNNER_GROUP_NAME:-}" ]; then
+    # Resolve by name
+    RUNNER_GROUP_ID="$(
+      curl -fsSL "${auth_hdr[@]}" "$API/$SCOPE_PATH/actions/runner-groups" \
+      | find_group_id_by_name "$RUNNER_GROUP_NAME" || true
+    )"
+    if [ -z "${RUNNER_GROUP_ID:-}" ]; then
+      echo "ERROR: Could not find runner group named '$RUNNER_GROUP_NAME'" >&2
+      exit 1
+    fi
   fi
-
-  # Fallback to classic registration token for repo
-  echo "WARN: JIT config failed; falling back to classic registration token…" >&2
-  REG_TOKEN="$(
-    curl -fsSL -X POST "${auth_hdr[@]}" \
-      "$API/$SCOPE_PATH/actions/runners/registration-token" \
-    | json_get token
-  )"
-  [ -n "$REG_TOKEN" ]
-  umask 077
-  printf '%s' "$REG_TOKEN" > "$HANDOFF_DIR/regtoken"
-  chmod 755 "$HANDOFF_DIR" || true
-  chmod 644 "$HANDOFF_DIR/regtoken" || true
-  echo "OK: wrote registration token to $HANDOFF_DIR/regtoken for runner '$RUNNER_NAME'."
-  exit 0
 fi
 
-# ---------- Org-level runners: handle runner groups ----------
-# If no group provided, use classic org registration token (Default group)
-if [ -z "${RUNNER_GROUP_ID:-}" ] && [ -z "${RUNNER_GROUP_NAME:-}" ]; then
-  REG_TOKEN="$(
-    curl -fsSL -X POST "${auth_hdr[@]}" \
-      "$API/$SCOPE_PATH/actions/runners/registration-token" \
-    | json_get token
-  )"
-  [ -n "$REG_TOKEN" ]
-  umask 077
-  printf '%s' "$REG_TOKEN" > "$HANDOFF_DIR/regtoken"
-  chmod 755 "$HANDOFF_DIR" || true
-  chmod 644 "$HANDOFF_DIR/regtoken" || true
-  echo "OK: wrote org reg token to $HANDOFF_DIR/regtoken (Default runner group)."
-  exit 0
-fi
-
-# Resolve runner group if a NAME was provided
-if [ -z "${RUNNER_GROUP_ID:-}" ] && [ -n "${RUNNER_GROUP_NAME:-}" ]; then
-  RUNNER_GROUP_ID="$(
-    curl -fsSL "${auth_hdr[@]}" "$API/$SCOPE_PATH/actions/runner-groups" \
-    | find_group_id_by_name "$RUNNER_GROUP_NAME" || true
-  )"
-fi
-
-if [ -z "${RUNNER_GROUP_ID:-}" ]; then
-  echo "ERROR: Provide RUNNER_GROUP_ID or a valid RUNNER_GROUP_NAME (requires python3), or leave both empty to use classic org token." >&2
-  exit 1
-fi
-
-# Try JIT (single-use, preferred) for org-level with runner group
+# ---------- Generate JIT config (always, no fallback) ----------
 JIT_BODY=$(printf '{"name":"%s","runner_group_id":%s,"labels":%s,"work_folder":"_work"}' \
                   "$RUNNER_NAME" "$RUNNER_GROUP_ID" "$RUNNER_LABELS_JSON")
 
-set +e
 JIT_RESP="$(
-  curl -fsS -X POST "${auth_hdr[@]}" -d "$JIT_BODY" \
+  curl -fsSL -X POST "${auth_hdr[@]}" -d "$JIT_BODY" \
     "$API/$SCOPE_PATH/actions/runners/generate-jitconfig"
 )"
-rc=$?
-set -e
 
-if [ $rc -eq 0 ]; then
-  ENCODED_JIT="$(printf '%s' "$JIT_RESP" | json_get encoded_jit_config)"
-  [ -n "$ENCODED_JIT" ]
-  umask 077
-  printf '%s' "$ENCODED_JIT" > "$HANDOFF_DIR/jit"
-  # Ensure runner user can read it from the shared EmptyDir
-  chmod 755 "$HANDOFF_DIR" || true
-  chmod 644 "$HANDOFF_DIR/jit" || true
-  echo "OK: wrote JIT config to $HANDOFF_DIR/jit for runner '$RUNNER_NAME' (labels: $RUNNER_LABELS_JSON)."
-  exit 0
-fi
+ENCODED_JIT="$(printf '%s' "$JIT_RESP" | json_get encoded_jit_config)"
+[ -n "$ENCODED_JIT" ] || { echo "ERROR: Failed to generate JIT config" >&2; exit 1; }
 
-# ---------- Fallback to classic org registration token ----------
-echo "WARN: JIT config failed; falling back to classic registration token…" >&2
-REG_TOKEN="$(
-  curl -fsSL -X POST "${auth_hdr[@]}" \
-    "$API/$SCOPE_PATH/actions/runners/registration-token" \
-  | json_get token
-)"
-[ -n "$REG_TOKEN" ]
 umask 077
-printf '%s' "$REG_TOKEN" > "$HANDOFF_DIR/regtoken"
+printf '%s' "$ENCODED_JIT" > "$HANDOFF_DIR/jit"
 chmod 755 "$HANDOFF_DIR" || true
-chmod 644 "$HANDOFF_DIR/regtoken" || true
-echo "OK: wrote registration token to $HANDOFF_DIR/regtoken for runner '$RUNNER_NAME'."
+chmod 644 "$HANDOFF_DIR/jit" || true
+echo "OK: wrote JIT config to $HANDOFF_DIR/jit for runner '$RUNNER_NAME' in group $RUNNER_GROUP_ID (labels: $RUNNER_LABELS_JSON)."
