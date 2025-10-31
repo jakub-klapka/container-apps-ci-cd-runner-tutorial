@@ -5,8 +5,7 @@ This document explains key architectural decisions and technical limitations for
 ## Table of Contents
 
 - [KEDA Scaler Limitations](#keda-scaler-limitations)
-- [Why Organization-Level Runners are Recommended](#why-organization-level-runners-are-recommended)
-- [Available Workarounds](#available-workarounds)
+- [Why Organization-Level Runners](#why-organization-level-runners)
 - [Design Decisions](#design-decisions)
 
 ---
@@ -71,9 +70,9 @@ KEDA is intentionally designed as a **metrics provider** for Kubernetes' Horizon
 
 ---
 
-## Why Organization-Level Runners are Recommended
+## Why Organization-Level Runners
 
-### The Problem with Repository-Level Registration
+### The Challenge with KEDA and Repository Context
 
 When using KEDA with Azure Container Apps:
 
@@ -82,9 +81,9 @@ When using KEDA with Azure Container Apps:
 3. **Pod Creation** - ACA creates a pod using your configured template
 4. **Missing Information** - The pod has no way to know which repository triggered the scale event
 
-### The Solution: Organization-Level Runners
+### Organization-Level Runners: The Solution
 
-**Organization-level runners solve this by design:**
+**This implementation uses organization-level runners exclusively:**
 
 ```bash
 # Set in Container App environment variables
@@ -107,125 +106,18 @@ Benefits:
 
 ---
 
-## Available Workarounds
-
-If you must use repository-specific runners with ACA, here are your options:
-
-### Option 1: Static Repository Configuration (Recommended)
-
-**Use case:** Single repository or known set of repositories
-
-```bash
-# Hardcode in Container App job definition
-GITHUB_REPOSITORY="owner/repo"
-```
-
-**Pros:**
-- Simple to configure
-- Explicit and predictable
-- Works with current init.sh
-
-**Cons:**
-- Must create separate jobs for multiple repos
-- Cannot dynamically route to specific repositories
-
-### Option 2: Multiple Container App Jobs
-
-**Use case:** Multiple repositories with isolated runners
-
-Create separate Container App jobs, each configured for a specific repository:
-
-```bash
-# Job 1 - Repo A
-GITHUB_REPOSITORY="org/repo-a"
-# Scaler watches: repos=org/repo-a
-
-# Job 2 - Repo B
-GITHUB_REPOSITORY="org/repo-b"
-# Scaler watches: repos=org/repo-b
-```
-
-**Pros:**
-- True repository isolation
-- Each repo has dedicated runners
-- Different runner configurations per repo
-
-**Cons:**
-- Operational overhead
-- More complex infrastructure
-- Duplicate configuration
-
-### Option 3: Parse Repository from Organization URL
-
-**Use case:** Want org-level flexibility with repo awareness
-
-Modify `init.sh` to extract owner from `GITHUB_REPOSITORY`:
-
-```bash
-if [ -n "$GITHUB_REPOSITORY" ]; then
-  GITHUB_ORG="${GITHUB_REPOSITORY%%/*}"  # Extract owner
-  # Use org-level registration
-fi
-```
-
-**Pros:**
-- Maintains flexibility
-- Single registration point
-- Simpler than multiple jobs
-
-**Cons:**
-- Still uses org-level registration (not truly repo-specific)
-- Runner appears at org level, not repo level
-
-### Option 4: Custom External Scaler (Advanced)
-
-**Use case:** Need true dynamic repository routing
-
-Build a KEDA external scaler that:
-- Monitors GitHub API
-- Passes repository metadata to containers
-- Implements custom scaling logic
-
-**Pros:**
-- Full control over metadata passing
-- Can implement custom routing logic
-- Solves the limitation completely
-
-**Cons:**
-- Significant development effort
-- Must maintain custom scaler
-- Increased complexity
-- See: https://keda.sh/docs/2.14/concepts/external-scalers/
-
----
-
 ## Design Decisions
 
-### Why Keep Repository-Level Support?
+### Organization-Level Only
 
-The current implementation supports both org-level and repo-level registration:
-
-```bash
-# Priority order:
-1. GITHUB_ORG → Organization-level (recommended)
-2. GITHUB_REPOSITORY → Repository-level (manual config only)
-```
+The implementation uses organization-level runners exclusively:
 
 **Rationale:**
-- Flexibility for different deployment scenarios
-- Supports manual/testing environments
-- Backward compatibility
-- Clear fallback behavior
-
-### Why Not Remove Repository-Level?
-
-Repository-level registration is valid for:
-- Local development and testing
-- Manual Docker deployments
-- Single-repo dedicated runners
-- Non-ACA deployments
-
-The code supports both, with clear documentation on when to use each.
+- Simplifies configuration and reduces complexity
+- Works seamlessly with KEDA scaler design
+- Runners automatically available to all repositories in the organization
+- Avoids the need for repository-specific configuration that KEDA cannot provide
+- Easier to manage and maintain
 
 ### JIT Configuration Only
 
@@ -235,10 +127,12 @@ The implementation uses JIT (Just-In-Time) configuration exclusively:
 - ✅ More secure (single-use tokens)
 - ✅ Simpler logic (no fallback complexity)
 - ✅ GitHub's recommended approach
-- ✅ Works for both org and repo levels
+- ✅ Ephemeral runners by design
 
-**Trade-off:**
-- Requires runner_group_id even for repos (uses default ID: 1)
+**Benefits:**
+- Each runner gets a unique, single-use configuration
+- No need to manage long-lived registration tokens
+- Automatic cleanup after job completion
 
 ---
 

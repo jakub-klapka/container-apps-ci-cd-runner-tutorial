@@ -1,30 +1,15 @@
 #!/usr/bin/env bash
-# Mint JIT runner config (preferred) or classic registration token for an org runner
+# Generate JIT runner configuration for GitHub Actions organization-level runners
 # Deps: bash, curl, openssl. Optional: python3 (for JSON parsing / group name lookup).
 set -euo pipefail
 set -x
 
 # -------- Inputs --------
-GITHUB_ORG="${GITHUB_ORG:-}"                         # org login (for org-level runners)
-GITHUB_REPOSITORY="${GITHUB_REPOSITORY:-}"           # auto-set by ACA scaler (format: owner/repo)
+: "${GITHUB_ORG:?missing GITHUB_ORG (org login)}"
 GITHUB_PAT="${GITHUB_PAT:-}"                         # optional; if set we use PAT mode
 
-# Determine scope: org-level if GITHUB_ORG is set, otherwise repo-level
-if [ -n "$GITHUB_ORG" ]; then
-  SCOPE="org"
-  SCOPE_PATH="orgs/$GITHUB_ORG"
-  echo "INFO: Using organization-level runner registration for $GITHUB_ORG"
-elif [ -n "$GITHUB_REPOSITORY" ]; then
-  SCOPE="repo"
-  SCOPE_PATH="repos/$GITHUB_REPOSITORY"
-  echo "INFO: Using repository-level runner registration for $GITHUB_REPOSITORY"
-else
-  echo "ERROR: Either GITHUB_ORG or GITHUB_REPOSITORY must be set" >&2
-  exit 1
-fi
-
-RUNNER_GROUP_NAME="${RUNNER_GROUP_NAME:-}"           # optional if RUNNER_GROUP_ID provided (org-level only)
-RUNNER_GROUP_ID="${RUNNER_GROUP_ID:-}"               # recommended to set explicitly for JIT (org-level only)
+RUNNER_GROUP_NAME="${RUNNER_GROUP_NAME:-}"           # optional if RUNNER_GROUP_ID provided
+RUNNER_GROUP_ID="${RUNNER_GROUP_ID:-}"               # recommended to set explicitly for JIT
 RUNNER_NAME="${RUNNER_NAME:-jit-$(hostname)-$RANDOM}"
 RUNNER_LABELS_JSON='["rbcz-azure"]'                  # your requested label
 HANDOFF_DIR="${HANDOFF_DIR:-/handoff}"
@@ -40,11 +25,14 @@ trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; printf '%s' "${s%"${s##*[
 
 json_get() {
   local key="$1"
+  local json_data
+  # Read stdin into variable before heredoc takes over stdin
+  json_data="$(cat)"
   if have_python; then
-    python3 - "$key" <<'PY'
+    python3 - "$key" "$json_data" <<'PY'
 import sys, json
 k = sys.argv[1]
-input_data = sys.stdin.read()
+input_data = sys.argv[2] if len(sys.argv) > 2 else ""
 if not input_data or not input_data.strip():
     print(f'ERROR: Empty response from API call. Check your credentials and API endpoint.', file=sys.stderr)
     sys.exit(2)
@@ -55,10 +43,7 @@ except json.JSONDecodeError as e:
     print(f'Received: {input_data[:200]}', file=sys.stderr)
     sys.exit(2)
 v = d.get(k, '')
-try:
-    print(v if not isinstance(v, (dict, list)) else json.dumps(v, separators=(',',':')))
-except Exception:
-    print(v if not isinstance(v, (dict, list)) else json.dumps(v, separators=(',',':')))
+print(v if not isinstance(v, (dict, list)) else json.dumps(v, separators=(',',':')))
 PY
   else
     echo "ERROR: python3 not found; cannot parse JSON." >&2
@@ -162,37 +147,35 @@ if [ -z "$INSTALL_TOKEN" ]; then
 fi
 auth_hdr=(-H "Accept: application/vnd.github+json" -H "Authorization: Bearer $INSTALL_TOKEN" -H "X-GitHub-Api-Version: $API_VERSION")
 
+echo "INFO: Using organization-level runner registration for $GITHUB_ORG"
+
 # ---------- Determine runner group ID ----------
-if [ "$SCOPE" = "repo" ]; then
-  # Repo-level runners use default group (ID: 1)
+if [ -z "${RUNNER_GROUP_ID:-}" ] && [ -z "${RUNNER_GROUP_NAME:-}" ]; then
+  # Default to group 1 if not specified
   RUNNER_GROUP_ID=1
-  echo "INFO: Using default runner group (ID: 1) for repository-level runner"
-else
-  # Org-level: resolve runner group
-  if [ -z "${RUNNER_GROUP_ID:-}" ] && [ -z "${RUNNER_GROUP_NAME:-}" ]; then
-    # Default to group 1 if not specified
-    RUNNER_GROUP_ID=1
-    echo "INFO: Using default runner group (ID: 1) for organization"
-  elif [ -z "${RUNNER_GROUP_ID:-}" ] && [ -n "${RUNNER_GROUP_NAME:-}" ]; then
-    # Resolve by name
-    RUNNER_GROUP_ID="$(
-      curl -fsSL "${auth_hdr[@]}" "$API/$SCOPE_PATH/actions/runner-groups" \
-      | find_group_id_by_name "$RUNNER_GROUP_NAME" || true
-    )"
-    if [ -z "${RUNNER_GROUP_ID:-}" ]; then
-      echo "ERROR: Could not find runner group named '$RUNNER_GROUP_NAME'" >&2
-      exit 1
-    fi
+  echo "INFO: Using default runner group (ID: 1)"
+elif [ -z "${RUNNER_GROUP_ID:-}" ] && [ -n "${RUNNER_GROUP_NAME:-}" ]; then
+  # Resolve by name
+  RUNNER_GROUP_ID="$(
+    curl -fsSL "${auth_hdr[@]}" "$API/orgs/$GITHUB_ORG/actions/runner-groups" \
+    | find_group_id_by_name "$RUNNER_GROUP_NAME"
+  )"
+  if [ -z "${RUNNER_GROUP_ID:-}" ]; then
+    echo "ERROR: Could not find runner group named '$RUNNER_GROUP_NAME'" >&2
+    exit 1
   fi
+  echo "INFO: Resolved runner group '$RUNNER_GROUP_NAME' to ID: $RUNNER_GROUP_ID"
+else
+  echo "INFO: Using runner group ID: $RUNNER_GROUP_ID"
 fi
 
-# ---------- Generate JIT config (always, no fallback) ----------
+# ---------- Generate JIT config ----------
 JIT_BODY=$(printf '{"name":"%s","runner_group_id":%s,"labels":%s,"work_folder":"_work"}' \
                   "$RUNNER_NAME" "$RUNNER_GROUP_ID" "$RUNNER_LABELS_JSON")
 
 JIT_RESP="$(
   curl -fsSL -X POST "${auth_hdr[@]}" -d "$JIT_BODY" \
-    "$API/$SCOPE_PATH/actions/runners/generate-jitconfig"
+    "$API/orgs/$GITHUB_ORG/actions/runners/generate-jitconfig"
 )"
 
 ENCODED_JIT="$(printf '%s' "$JIT_RESP" | json_get encoded_jit_config)"

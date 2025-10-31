@@ -30,18 +30,15 @@ See the [official tutorial](https://learn.microsoft.com/azure/container-apps/tut
 ### Scripts (`github-actions-runner/`)
 
 - **`init.sh`** - Authentication and JIT config generation script
+  - **Organization-level runners only**
   - Supports both GitHub PAT and GitHub App authentication
-  - Generates JIT config exclusively (no fallback to classic tokens)
-  - Supports both org-level and repo-level runner registration
+  - Generates JIT config exclusively (no classic registration tokens)
   - Writes JIT config to `/handoff` directory (default) for the runner container
   - Environment variables:
-    - Scope selection (priority order):
-      - `GITHUB_ORG` - Use org-level registration (takes precedence)
-      - `GITHUB_REPOSITORY` - Use repo-level registration (format: owner/repo, auto-set by ACA scaler)
+    - Required: `GITHUB_ORG` (organization login)
     - Auth mode: `GITHUB_PAT` (Personal Access Token) or `GITHUB_APP_ID` + `GITHUB_INSTALLATION_ID` + `GITHUB_APP_PRIVATE_KEY_PEM`
-    - Optional: `RUNNER_GROUP_ID` (org-level only, defaults to 1), `RUNNER_GROUP_NAME` (org-level only), `RUNNER_NAME`, `RUNNER_LABELS_JSON`, `HANDOFF_DIR`
+    - Optional: `RUNNER_GROUP_ID` (defaults to 1), `RUNNER_GROUP_NAME`, `RUNNER_NAME`, `RUNNER_LABELS_JSON`, `HANDOFF_DIR`
   - Default label: `["rbcz-azure"]` (hardcoded)
-  - Repo-level runners always use runner_group_id: 1 (default)
 
 - **`entrypoint.sh`** - Runner startup script
   - Reads JIT config from `/mnt/reg-token-store/jit` (mount path in Azure Container Apps)
@@ -72,31 +69,23 @@ Both modes generate JIT config exclusively - no fallback to classic registration
 
 ### Runner Scope
 
-- **Organization-level** (when `GITHUB_ORG` is set): Runners appear in org settings, can use custom runner groups
-- **Repository-level** (when `GITHUB_REPOSITORY` is set): Runners appear in repo settings, use default group (ID: 1)
-- Priority: `GITHUB_ORG` takes precedence if both are set
+- **Organization-level only**: Runners appear in org settings and can service any repository in the organization
+- Can use custom runner groups via `RUNNER_GROUP_ID` or `RUNNER_GROUP_NAME` (defaults to group 1)
 
-### Recommended Configuration for Azure Container Apps
-
-**⚠️ Important: Use organization-level registration with ACA**
+### Configuration for Azure Container Apps
 
 When deploying with Azure Container Apps and KEDA's GitHub Runner scaler:
 
-1. **Set `GITHUB_ORG` explicitly** - KEDA cannot auto-populate `GITHUB_REPOSITORY` from triggering workflows
-2. **Omit or ignore `GITHUB_REPOSITORY`** - While the scaler may set this variable, it won't contain the triggering repo
-3. **Use runner groups** - Set `RUNNER_GROUP_ID` to organize runners (defaults to 1 if omitted)
+1. **Set `GITHUB_ORG`** (required) - Your GitHub organization login
+2. **Set `RUNNER_GROUP_ID`** (optional) - Organize runners by group (defaults to 1)
+3. **Set `GITHUB_PAT`** - Personal Access Token with appropriate permissions
 
-**Why org-level?**
-- KEDA scalers only determine *when* to scale, not *what* metadata to pass to containers
+**Why organization-level?**
+- KEDA scalers determine *when* to scale based on workflow queue depth
 - Repository information from triggering workflows is not available to init containers
-- Org-level runners can service any repository in your organization
+- Org-level runners can service any repository in your organization automatically
 
-**When is repo-level appropriate?**
-- Manual deployments where you hardcode `GITHUB_REPOSITORY` in your job config
-- Single-repository setups with static configuration
-- Testing and development environments
-
-See `ARCHITECTURE.md` for detailed technical explanation of KEDA scaler limitations.
+See `ARCHITECTURE.md` for detailed technical explanation of KEDA scaler design.
 
 ## Building Images on Azure Container Registry
 
@@ -150,18 +139,18 @@ docker build -f Dockerfile.github -t <registry>/github-runner:latest .
 To test the init script locally:
 
 ```bash
-# Org-level with custom runner group
+# With default runner group (ID: 1)
+docker run --rm \
+  -e GITHUB_ORG=myorg \
+  -e GITHUB_PAT=ghp_xxx \
+  -v /tmp/handoff:/handoff \
+  <registry>/runner-init:latest
+
+# With custom runner group
 docker run --rm \
   -e GITHUB_ORG=myorg \
   -e GITHUB_PAT=ghp_xxx \
   -e RUNNER_GROUP_ID=7 \
-  -v /tmp/handoff:/handoff \
-  <registry>/runner-init:latest
-
-# Repo-level (uses default group ID: 1)
-docker run --rm \
-  -e GITHUB_REPOSITORY=owner/repo \
-  -e GITHUB_PAT=ghp_xxx \
   -v /tmp/handoff:/handoff \
   <registry>/runner-init:latest
 
@@ -184,5 +173,5 @@ docker run --rm \
 - JIT configs are single-use and ephemeral - each runner gets a unique config
 - The default runner label `rbcz-azure` is hardcoded in `init.sh` - modify as needed for your use case
 - Azure Container Apps mounts the shared volume from `$HANDOFF_DIR` to `/mnt/reg-token-store` in the runner container
-- When ACA scaler sets `GITHUB_REPOSITORY`, runners automatically register at repo-level
-- For org-level runners with custom groups, explicitly set `GITHUB_ORG` and `RUNNER_GROUP_ID`
+- Runners register at organization level and can service any repository in your organization
+- Use `RUNNER_GROUP_ID` to organize runners (defaults to 1 if not specified)
