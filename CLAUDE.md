@@ -89,7 +89,7 @@ See `ARCHITECTURE.md` for detailed technical explanation of KEDA scaler design.
 
 ## Building Images on Azure Container Registry
 
-**Current version: 20.0** (increment by 1 for each build)
+**Current version: 21.0** (increment by 1 for each build)
 
 **⚠️ Important Build Workflow:**
 
@@ -109,14 +109,14 @@ git push origin main
 # 2. Then: Build init container (increment version number for each build)
 az acr build \
     --registry "$CONTAINER_REGISTRY_NAME" \
-    --image "github-actions-init:21.0" \
+    --image "github-actions-init:22.0" \
     --file "Dockerfile.init" \
     "https://github.com/jakub-klapka/container-apps-ci-cd-runner-tutorial.git"
 
 # Build runner container
 az acr build \
     --registry "$CONTAINER_REGISTRY_NAME" \
-    --image "github-actions-runner:21.0" \
+    --image "github-actions-runner:22.0" \
     --file "Dockerfile.github" \
     "https://github.com/jakub-klapka/container-apps-ci-cd-runner-tutorial.git"
 
