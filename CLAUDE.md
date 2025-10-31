@@ -78,7 +78,7 @@ Both modes generate JIT config exclusively - no fallback to classic registration
 
 ## Building Images on Azure Container Registry
 
-**Current version: 15.0** (increment by 1 for each build)
+**Current version: 16.0** (increment by 1 for each build)
 
 ```bash
 # Set your registry name
@@ -87,14 +87,14 @@ CONTAINER_REGISTRY_NAME="your-acr-name"
 # Build init container (increment version number for each build)
 az acr build \
     --registry "$CONTAINER_REGISTRY_NAME" \
-    --image "github-actions-init:16.0" \
+    --image "github-actions-init:17.0" \
     --file "Dockerfile.init" \
     "https://github.com/jakub-klapka/container-apps-ci-cd-runner-tutorial.git"
 
 # Build runner container
 az acr build \
     --registry "$CONTAINER_REGISTRY_NAME" \
-    --image "github-actions-runner:16.0" \
+    --image "github-actions-runner:17.0" \
     --file "Dockerfile.github" \
     "https://github.com/jakub-klapka/container-apps-ci-cd-runner-tutorial.git"
 ```
