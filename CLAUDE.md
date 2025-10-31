@@ -89,8 +89,10 @@ See `ARCHITECTURE.md` for detailed technical explanation of KEDA scaler design.
 
 ## Building Images on Azure Container Registry
 
+**Azure Container Registry:** `jklrbacaacr.azurecr.io`
+
 **Current versions:**
-- Init container: **21.0**
+- Init container: **22.0**
 - Runner container: **9.0**
 
 (Increment by 1 for each build)
@@ -102,9 +104,6 @@ See `ARCHITECTURE.md` for detailed technical explanation of KEDA scaler design.
 3. **Update version tracking in CLAUDE.md** - Document the new version
 
 ```bash
-# Set your registry name
-CONTAINER_REGISTRY_NAME="your-acr-name"
-
 # 1. First: Commit and push your changes
 git add .
 git commit -m "Your commit message"
@@ -112,15 +111,15 @@ git push origin main
 
 # 2. Then: Build init container (increment version number for each build)
 az acr build \
-    --registry "$CONTAINER_REGISTRY_NAME" \
-    --image "github-actions-init:22.0" \
+    --registry "jklrbacaacr" \
+    --image "github-actions-init:23.0" \
     --file "Dockerfile.init" \
     "https://github.com/jakub-klapka/container-apps-ci-cd-runner-tutorial.git"
 
 # Build runner container
 az acr build \
-    --registry "$CONTAINER_REGISTRY_NAME" \
-    --image "github-actions-runner:22.0" \
+    --registry "jklrbacaacr" \
+    --image "github-actions-runner:10.0" \
     --file "Dockerfile.github" \
     "https://github.com/jakub-klapka/container-apps-ci-cd-runner-tutorial.git"
 
