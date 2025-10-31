@@ -41,7 +41,8 @@ trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; printf '%s' "${s%"${s##*[
 json_get() {
   local key="$1"
   if have_python; then
-    python3 -c "import sys, json
+    python3 - "$key" <<'PY'
+import sys, json
 k = sys.argv[1]
 input_data = sys.stdin.read()
 if not input_data or not input_data.strip():
@@ -57,7 +58,8 @@ v = d.get(k, '')
 try:
     print(v if not isinstance(v, (dict, list)) else json.dumps(v, separators=(',',':')))
 except Exception:
-    print(v if not isinstance(v, (dict, list)) else json.dumps(v, separators=(',',':')))" "$key"
+    print(v if not isinstance(v, (dict, list)) else json.dumps(v, separators=(',',':')))
+PY
   else
     echo "ERROR: python3 not found; cannot parse JSON." >&2
     exit 2
