@@ -89,7 +89,11 @@ See `ARCHITECTURE.md` for detailed technical explanation of KEDA scaler design.
 
 ## Building Images on Azure Container Registry
 
-**Current version: 21.0** (increment by 1 for each build)
+**Current versions:**
+- Init container: **21.0**
+- Runner container: **9.0**
+
+(Increment by 1 for each build)
 
 **⚠️ Important Build Workflow:**
 
@@ -175,4 +179,27 @@ docker run --rm \
 - Azure Container Apps mounts the shared volume from `$HANDOFF_DIR` to `/mnt/reg-token-store` in the runner container
 - Runners register at organization level and can service any repository in your organization
 - Use `RUNNER_GROUP_ID` to organize runners (defaults to 1 if not specified)
-- dont change the permissions on handoff dir, since its mouned by aca
+
+## Troubleshooting
+
+### Line Ending Issues
+
+**Problem:** `/bin/sh: 0: Illegal option -` or similar shell parsing errors
+
+**Solution:** All shell scripts must use Unix (LF) line endings, not Windows (CRLF). Fix with:
+```bash
+sed -i 's/\r$//' github-actions-runner/init.sh
+sed -i 's/\r$//' github-actions-runner/entrypoint.sh
+```
+
+### Permission Issues
+
+**Problem:** Cannot modify permissions on `/mnt/reg-token-store` or `HANDOFF_DIR`
+
+**Solution:** These directories are mounted by Azure Container Apps and should NOT have permissions modified by the init script. The `umask` setting in init.sh is sufficient for file permissions. Do not use `chmod` on the mounted directory.
+
+### Python JSON Parsing Errors
+
+**Problem:** `ERROR: Empty response from API call` but runner is registered
+
+**Solution:** Check the script exit code (`echo $?`). If it's 0, the script succeeded despite stderr messages. The current implementation uses `python3 -c` which may show cosmetic errors but works correctly.
