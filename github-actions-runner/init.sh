@@ -1,24 +1,31 @@
 #!/usr/bin/env bash
-# Generate JIT runner config for an organization-level GitHub Actions runner
-# Deps: bash, curl, openssl, jq
+# Generate JIT runner config for GitHub Actions runners (org or repo level)
+# Deps: bash, curl, jq
 set -euo pipefail
 
 # -------- Inputs --------
-: "${GITHUB_ORG:?missing GITHUB_ORG (org login)}"
-: "${RUNNER_GROUP_ID:?missing RUNNER_GROUP_ID (runner group ID)}"
-
-GITHUB_PAT="${GITHUB_PAT:-}"                         # optional; if set we use PAT mode
+RUNNER_SCOPE="${RUNNER_SCOPE:-org}"
+: "${GITHUB_PAT:?missing GITHUB_PAT}"
+: "${RUNNER_LABEL:?missing RUNNER_LABEL (custom label string)}"
 RUNNER_NAME="${RUNNER_NAME:-jit-$(hostname)-$RANDOM}"
-RUNNER_LABELS_JSON='["rbcz-azure"]'
 HANDOFF_DIR="${HANDOFF_DIR:-/handoff}"
 API="${API:-https://api.github.com}"
 API_VERSION="2022-11-28"
 
-echo "==> Initializing GitHub Actions runner configuration"
-echo "    Organization: $GITHUB_ORG"
-echo "    Runner Group ID: $RUNNER_GROUP_ID"
-echo "    Runner Name: $RUNNER_NAME"
-echo "    Labels: $RUNNER_LABELS_JSON"
+# Validate scope
+if [ "$RUNNER_SCOPE" != "org" ] && [ "$RUNNER_SCOPE" != "repo" ]; then
+  echo "ERROR: RUNNER_SCOPE must be 'org' or 'repo'" >&2
+  exit 1
+fi
+
+# Mode-specific validation
+if [ "$RUNNER_SCOPE" = "org" ]; then
+  : "${GITHUB_ORG:?missing GITHUB_ORG (organization name)}"
+  : "${RUNNER_GROUP_ID:?missing RUNNER_GROUP_ID (runner group ID)}"
+else
+  : "${GITHUB_OWNER:?missing GITHUB_OWNER (owner/org name)}"
+  RUNNER_GROUP_ID=1  # Always 1 for repo runners
+fi
 
 # -------- Helpers --------
 json_get() {
@@ -40,86 +47,205 @@ json_get() {
   }
 }
 
-b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+check_rate_limit() {
+  local response
+  response=$(curl -fsSL \
+    -H "Authorization: Bearer $GITHUB_PAT" \
+    -H "X-GitHub-Api-Version: $API_VERSION" \
+    "$API/rate_limit")
 
-make_jwt_with_key() {
-  local now iat exp header payload unsigned sig passin key_tmp
-  now=$(date +%s); iat=$((now-60)); exp=$((now+540))
-  header='{"alg":"RS256","typ":"JWT"}'
-  payload=$(printf '{"iat":%d,"exp":%d,"iss":%d}' "$iat" "$exp" "$GITHUB_APP_ID")
-  unsigned="$(printf '%s' "$header" | b64url).$(printf '%s' "$payload" | b64url)"
-  passin="pass:"  # no prompt; empty passphrase by default
-  if [ -n "${GITHUB_APP_KEY_PASSPHRASE:-}" ]; then passin="pass:${GITHUB_APP_KEY_PASSPHRASE}"; fi
+  local remaining
+  remaining=$(echo "$response" | jq -r '.rate.remaining')
 
-  # Write PEM to temp file for signing
-  key_tmp="$(mktemp)"
-  chmod 600 "$key_tmp"
-  printf '%s\n' "$GITHUB_APP_PRIVATE_KEY_PEM" | sed 's/\\r//g; s/\\n/\n/g' > "$key_tmp"
-
-  sig="$(printf '%s' "$unsigned" | openssl dgst -sha256 -sign "$key_tmp" -passin "$passin" -binary | b64url)"
-
-  # Cleanup temp key file
-  if command -v shred >/dev/null 2>&1; then shred -u "$key_tmp" || rm -f "$key_tmp"; else rm -f "$key_tmp"; fi
-
-  printf '%s.%s\n' "$unsigned" "$sig"
+  if [ "$remaining" -lt 50 ]; then
+    echo "ERROR: GitHub API rate limit nearly exhausted (remaining: $remaining)" >&2
+    local reset_time
+    reset_time=$(echo "$response" | jq -r '.rate.reset')
+    echo "Rate limit resets at: $(date -d @"$reset_time" 2>/dev/null || date -r "$reset_time" 2>/dev/null)" >&2
+    exit 1
+  fi
 }
 
-# ---------- Auth mode: PAT or GitHub App ----------
-USE_PAT=false
-if [ -n "${GITHUB_PAT}" ]; then
-  USE_PAT=true
-fi
+list_repositories() {
+  local page=1
+  local all_repos=""
 
-if $USE_PAT; then
-  echo "==> Using Personal Access Token (PAT) authentication"
-  INSTALL_TOKEN="${GITHUB_PAT}"
-  # Ensure nothing later tries to touch App credentials
-  unset GITHUB_APP_ID GITHUB_INSTALLATION_ID GITHUB_APP_PRIVATE_KEY_PEM GITHUB_APP_KEY_PASSPHRASE || true
-else
-  echo "==> Using GitHub App authentication"
-  # App mode requires these:
-  : "${GITHUB_APP_ID:?missing GITHUB_APP_ID (App ID integer)}"
-  : "${GITHUB_INSTALLATION_ID:?missing GITHUB_INSTALLATION_ID}"
-  : "${GITHUB_APP_PRIVATE_KEY_PEM:?missing GITHUB_APP_PRIVATE_KEY_PEM (inline PEM)}"
-  echo "    App ID: $GITHUB_APP_ID"
-  echo "    Installation ID: $GITHUB_INSTALLATION_ID"
-  echo "==> Generating JWT for GitHub App authentication"
-  JWT="$(make_jwt_with_key)"
-  echo "==> Obtaining installation access token"
-  INSTALL_TOKEN="$(
-    curl -fsSL -X POST \
+  while true; do
+    local response
+    response=$(curl -fsSL \
       -H "Accept: application/vnd.github+json" \
-      -H "Authorization: Bearer $JWT" \
+      -H "Authorization: Bearer $GITHUB_PAT" \
       -H "X-GitHub-Api-Version: $API_VERSION" \
-      "$API/app/installations/$GITHUB_INSTALLATION_ID/access_tokens" \
-    | json_get token
-  )"
+      "$API/user/repos?visibility=all&per_page=100&page=$page")
+
+    # Check if we got any results
+    local count
+    count=$(echo "$response" | jq '. | length')
+    [ "$count" -eq 0 ] && break
+
+    # Extract repos for the target owner
+    local page_repos
+    page_repos=$(echo "$response" | jq -r ".[] | select(.owner.login == \"$GITHUB_OWNER\") | .name")
+
+    # Add matching repos if any (page might have no matches)
+    if [ -n "$page_repos" ]; then
+      all_repos="$all_repos$page_repos"$'\n'
+    fi
+
+    # Continue if we got full page (means more might exist)
+    [ "$count" -lt 100 ] && break
+
+    page=$((page + 1))
+  done
+
+  # Filter by GITHUB_REPOS if specified
+  if [ -n "${GITHUB_REPOS:-}" ]; then
+    # Convert comma-separated list to newline-separated and trim spaces
+    local filter_list
+    filter_list=$(echo "$GITHUB_REPOS" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    echo "$all_repos" | grep -Fx -f <(echo "$filter_list")
+  else
+    echo "$all_repos"
+  fi
+}
+
+get_queued_runs() {
+  local repo="$1"
+  curl -fsSL \
+    -H "Accept: application/vnd.github+json" \
+    -H "Authorization: Bearer $GITHUB_PAT" \
+    -H "X-GitHub-Api-Version: $API_VERSION" \
+    "$API/repos/$GITHUB_OWNER/$repo/actions/runs?status=queued&per_page=100" \
+    | jq -r '.workflow_runs[]?.id // empty'
+}
+
+get_job_labels() {
+  local repo="$1"
+  local run_id="$2"
+  curl -fsSL \
+    -H "Accept: application/vnd.github+json" \
+    -H "Authorization: Bearer $GITHUB_PAT" \
+    -H "X-GitHub-Api-Version: $API_VERSION" \
+    "$API/repos/$GITHUB_OWNER/$repo/actions/runs/$run_id/jobs?per_page=100" \
+    | jq -r '.jobs[]? | select(.status == "queued") | .labels[]? // empty'
+}
+
+find_matching_repo() {
+  echo "==> Discovering repository with matching queued jobs" >&2
+
+  local repos
+  repos=$(list_repositories)
+
+  if [ -z "$repos" ]; then
+    echo "ERROR: No repositories found for owner '$GITHUB_OWNER'" >&2
+    return 1
+  fi
+
+  while IFS= read -r repo; do
+    [ -z "$repo" ] && continue
+    echo "    Checking $GITHUB_OWNER/$repo..." >&2
+
+    local runs
+    runs=$(get_queued_runs "$repo")
+
+    if [ -z "$runs" ]; then
+      echo "      No queued runs" >&2
+      continue
+    fi
+
+    local run_count
+    run_count=$(echo "$runs" | wc -l)
+    echo "      Found $run_count queued run(s)" >&2
+
+    while IFS= read -r run_id; do
+      [ -z "$run_id" ] && continue
+      echo "      Run $run_id: checking jobs..." >&2
+
+      local labels
+      labels=$(get_job_labels "$repo" "$run_id")
+
+      if echo "$labels" | grep -qx "$RUNNER_LABEL"; then
+        echo "      ✓ MATCH found on label '$RUNNER_LABEL'!" >&2
+        echo "$repo"
+        return 0
+      fi
+    done <<< "$runs"
+  done <<< "$repos"
+
+  return 1
+}
+
+# -------- Initialization --------
+echo "==> Initializing GitHub Actions runner"
+echo "    Scope: $RUNNER_SCOPE"
+echo "    Label: $RUNNER_LABEL"
+echo "    Runner Name: $RUNNER_NAME"
+
+if [ "$RUNNER_SCOPE" = "org" ]; then
+  echo "    Organization: $GITHUB_ORG"
+  echo "    Runner Group ID: $RUNNER_GROUP_ID"
+else
+  echo "    Owner: $GITHUB_OWNER"
+  if [ -n "${GITHUB_REPOS:-}" ]; then
+    echo "    Target Repos: $GITHUB_REPOS"
+  else
+    echo "    Target Repos: all accessible repos"
+  fi
 fi
 
-if [ -z "$INSTALL_TOKEN" ]; then
-  echo "ERROR: Failed to obtain auth token" >&2
-  echo "Check your GITHUB_PAT or GitHub App credentials (GITHUB_APP_ID, GITHUB_INSTALLATION_ID, GITHUB_APP_PRIVATE_KEY_PEM)" >&2
-  exit 1
-fi
-auth_hdr=(-H "Accept: application/vnd.github+json" -H "Authorization: Bearer $INSTALL_TOKEN" -H "X-GitHub-Api-Version: $API_VERSION")
+echo "==> Using Personal Access Token (PAT) authentication"
+INSTALL_TOKEN="$GITHUB_PAT"
 
-# ---------- Generate JIT config ----------
+# -------- Repository Discovery (repo mode only) --------
+if [ "$RUNNER_SCOPE" = "repo" ]; then
+  check_rate_limit
+
+  GITHUB_REPO=$(find_matching_repo)
+
+  if [ -z "$GITHUB_REPO" ]; then
+    echo "ERROR: No repository found with queued jobs matching label '$RUNNER_LABEL'" >&2
+    exit 1
+  fi
+
+  echo "==> Selected repository: $GITHUB_OWNER/$GITHUB_REPO"
+fi
+
+# -------- Generate JIT config --------
 echo "==> Generating JIT runner configuration"
-JIT_BODY=$(printf '{"name":"%s","runner_group_id":%s,"labels":%s,"work_folder":"_work"}' \
-                  "$RUNNER_NAME" "$RUNNER_GROUP_ID" "$RUNNER_LABELS_JSON")
 
-JIT_RESP="$(
-  curl -fsSL -X POST "${auth_hdr[@]}" -d "$JIT_BODY" \
-    "$API/orgs/$GITHUB_ORG/actions/runners/generate-jitconfig"
-)"
+if [ "$RUNNER_SCOPE" = "org" ]; then
+  JIT_ENDPOINT="$API/orgs/$GITHUB_ORG/actions/runners/generate-jitconfig"
+else
+  JIT_ENDPOINT="$API/repos/$GITHUB_OWNER/$GITHUB_REPO/actions/runners/generate-jitconfig"
+fi
 
-ENCODED_JIT="$(printf '%s' "$JIT_RESP" | json_get encoded_jit_config)"
-[ -n "$ENCODED_JIT" ] || { echo "ERROR: Failed to generate JIT config" >&2; exit 1; }
+JIT_BODY=$(printf '{"name":"%s","runner_group_id":%s,"labels":["%s"],"work_folder":"_work"}' \
+                  "$RUNNER_NAME" "$RUNNER_GROUP_ID" "$RUNNER_LABEL")
+
+JIT_RESP=$(curl -fsSL -X POST \
+  -H "Accept: application/vnd.github+json" \
+  -H "Authorization: Bearer $INSTALL_TOKEN" \
+  -H "X-GitHub-Api-Version: $API_VERSION" \
+  -d "$JIT_BODY" \
+  "$JIT_ENDPOINT")
+
+ENCODED_JIT=$(echo "$JIT_RESP" | jq -r '.encoded_jit_config // empty')
+[ -n "$ENCODED_JIT" ] || {
+  echo "ERROR: Failed to generate JIT config" >&2
+  echo "Response: ${JIT_RESP:0:500}" >&2
+  exit 1
+}
 
 umask 077
 printf '%s' "$ENCODED_JIT" > "$HANDOFF_DIR/jit"
+
 echo "==> Successfully created JIT configuration"
 echo "    Written to: $HANDOFF_DIR/jit"
+if [ "$RUNNER_SCOPE" = "org" ]; then
+  echo "    Organization: $GITHUB_ORG"
+  echo "    Group ID: $RUNNER_GROUP_ID"
+else
+  echo "    Repository: $GITHUB_OWNER/$GITHUB_REPO"
+fi
 echo "    Runner: $RUNNER_NAME"
-echo "    Group ID: $RUNNER_GROUP_ID"
-echo "    Labels: $RUNNER_LABELS_JSON"
+echo "    Label: $RUNNER_LABEL"

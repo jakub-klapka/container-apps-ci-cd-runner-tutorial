@@ -30,17 +30,22 @@ See the [official tutorial](https://learn.microsoft.com/azure/container-apps/tut
 ### Scripts (`github-actions-runner/`)
 
 - **`init.sh`** - Authentication and JIT config generation script
-  - **Organization-level runners only**
-  - Supports both GitHub PAT and GitHub App authentication
+  - **Supports both organization-level and repository-level runners**
+  - Uses PAT (Personal Access Token) authentication only
   - Generates JIT config exclusively (no classic registration tokens)
   - Writes JIT config to `/handoff` directory (default) for the runner container
   - Uses jq for JSON parsing (clean and efficient)
   - Structured logging with clear progress indicators
+  - **Repository discovery**: For repo scope, automatically queries GitHub API to find repositories with queued workflows matching the label
   - Environment variables:
-    - Required: `GITHUB_ORG` (organization login), `RUNNER_GROUP_ID` (runner group ID)
-    - Auth mode: `GITHUB_PAT` (Personal Access Token) or `GITHUB_APP_ID` + `GITHUB_INSTALLATION_ID` + `GITHUB_APP_PRIVATE_KEY_PEM` (inline PEM content)
-    - Optional: `RUNNER_NAME`, `RUNNER_LABELS_JSON`, `HANDOFF_DIR`, `API` (defaults to https://api.github.com)
-  - Default label: `["rbcz-azure"]` (hardcoded)
+    - **Common (all modes):**
+      - Required: `GITHUB_PAT` (Personal Access Token), `RUNNER_LABEL` (single label string, e.g., "rbcz-azure")
+      - Optional: `RUNNER_SCOPE` (defaults to "org"), `RUNNER_NAME`, `HANDOFF_DIR`, `API`
+    - **Organization mode (`RUNNER_SCOPE=org`):**
+      - Required: `GITHUB_ORG` (organization login), `RUNNER_GROUP_ID` (runner group ID)
+    - **Repository mode (`RUNNER_SCOPE=repo`):**
+      - Required: `GITHUB_OWNER` (owner/org name)
+      - Optional: `GITHUB_REPOS` (comma-separated repo names to check, e.g., "repo1,repo2")
 
 - **`entrypoint.sh`** - Runner startup script
   - Reads JIT config from `/mnt/reg-token-store/jit` (mount path in Azure Container Apps)
@@ -62,25 +67,45 @@ See the [official tutorial](https://learn.microsoft.com/azure/container-apps/tut
 
 ### Authentication Flow
 
-The `init.sh` script supports two authentication modes:
-
-1. **PAT Mode** (when `GITHUB_PAT` is set): Uses Personal Access Token directly
-2. **GitHub App Mode**: Uses App credentials (`GITHUB_APP_ID`, `GITHUB_INSTALLATION_ID`, `GITHUB_APP_PRIVATE_KEY_PEM`) to generate installation access token
-
-Both modes generate JIT config exclusively - no fallback to classic registration tokens.
+The `init.sh` script uses PAT (Personal Access Token) authentication exclusively:
+- **PAT Mode**: Uses Personal Access Token directly with GitHub API
+- **Required PAT scopes**:
+  - Organization runners: `admin:org` scope
+  - Repository runners: `repo` scope
+- Generates JIT config exclusively - no fallback to classic registration tokens
 
 ### Runner Scope
 
-- **Organization-level only**: Runners appear in org settings and can service any repository in the organization
-- Must specify runner group via `RUNNER_GROUP_ID` (required parameter)
+The init script supports two runner scopes:
+
+1. **Organization-level (`RUNNER_SCOPE=org`)**:
+   - Runners appear in org settings and can service any repository in the organization
+   - Must specify runner group via `RUNNER_GROUP_ID`
+   - Single API call to generate JIT config
+
+2. **Repository-level (`RUNNER_SCOPE=repo`)**:
+   - Runners are dedicated to a single specific repository
+   - Automatically discovers which repository has queued workflows
+   - Queries GitHub API to find repos with matching label
+   - Always uses runner_group_id: 1 (hardcoded for repo runners)
 
 ### Configuration for Azure Container Apps
 
 When deploying with Azure Container Apps and KEDA's GitHub Runner scaler:
 
-1. **Set `GITHUB_ORG`** (required) - Your GitHub organization login
-2. **Set `RUNNER_GROUP_ID`** (required) - Runner group ID to organize runners
-3. **Set `GITHUB_PAT`** (required) - Personal Access Token with appropriate permissions
+**Organization-level runners:**
+1. **Set `RUNNER_SCOPE=org`** (or omit, it's the default)
+2. **Set `GITHUB_ORG`** (required) - Your GitHub organization login
+3. **Set `RUNNER_GROUP_ID`** (required) - Runner group ID
+4. **Set `GITHUB_PAT`** (required) - PAT with `admin:org` scope
+5. **Set `RUNNER_LABEL`** (required) - Single label string (e.g., "rbcz-azure")
+
+**Repository-level runners:**
+1. **Set `RUNNER_SCOPE=repo`**
+2. **Set `GITHUB_OWNER`** (required) - Owner/org name
+3. **Set `GITHUB_PAT`** (required) - PAT with `repo` scope
+4. **Set `RUNNER_LABEL`** (required) - Single label string (e.g., "rbcz-azure")
+5. **Set `GITHUB_REPOS`** (optional) - Comma-separated repo names to check (if omitted, checks all accessible repos)
 
 **Why organization-level?**
 - KEDA scalers determine *when* to scale based on workflow queue depth
@@ -141,29 +166,61 @@ docker build -f Dockerfile.github -t <registry>/github-runner:latest .
 
 ## Testing Locally
 
-To test the init script locally:
+### Organization-Level Runners
 
 ```bash
-# With PAT authentication
+# Direct script test
+RUNNER_SCOPE="org" \
+GITHUB_ORG="myorg" \
+GITHUB_PAT="ghp_xxx" \
+RUNNER_LABEL="rbcz-azure" \
+RUNNER_GROUP_ID=7 \
+HANDOFF_DIR="./handoff" \
+./github-actions-runner/init.sh
+
+# Docker test
 docker run --rm \
+  -e RUNNER_SCOPE=org \
   -e GITHUB_ORG=myorg \
   -e GITHUB_PAT=ghp_xxx \
-  -e RUNNER_GROUP_ID=7 \
-  -v /tmp/handoff:/handoff \
-  <registry>/runner-init:latest
-
-# With GitHub App authentication
-docker run --rm \
-  -e GITHUB_ORG=myorg \
-  -e GITHUB_APP_ID=123456 \
-  -e GITHUB_INSTALLATION_ID=789012 \
-  -e GITHUB_APP_PRIVATE_KEY_PEM="-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----" \
+  -e RUNNER_LABEL=rbcz-azure \
   -e RUNNER_GROUP_ID=7 \
   -v /tmp/handoff:/handoff \
   <registry>/runner-init:latest
 
 # Check generated JIT config
 cat /tmp/handoff/jit
+```
+
+### Repository-Level Runners
+
+```bash
+# Auto-discovery (checks all accessible repos)
+RUNNER_SCOPE="repo" \
+GITHUB_OWNER="myorg" \
+GITHUB_PAT="ghp_xxx" \
+RUNNER_LABEL="rbcz-azure" \
+HANDOFF_DIR="./handoff" \
+./github-actions-runner/init.sh
+
+# With specific repos filter (faster)
+RUNNER_SCOPE="repo" \
+GITHUB_OWNER="myorg" \
+GITHUB_REPOS="repo1,repo2" \
+GITHUB_PAT="ghp_xxx" \
+RUNNER_LABEL="rbcz-azure" \
+HANDOFF_DIR="./handoff" \
+./github-actions-runner/init.sh
+
+# Docker test
+docker run --rm \
+  -e RUNNER_SCOPE=repo \
+  -e GITHUB_OWNER=myorg \
+  -e GITHUB_REPOS=repo1,repo2 \
+  -e GITHUB_PAT=ghp_xxx \
+  -e RUNNER_LABEL=rbcz-azure \
+  -v /tmp/handoff:/handoff \
+  <registry>/runner-init:latest
 ```
 
 To test the runner container (after init generates JIT config):
@@ -179,11 +236,14 @@ docker run --rm \
 - Both containers must use the same base image version to ensure `runner` user/group IDs match
 - The handoff directory must be readable by the `runner` user (UID/GID from base image)
 - JIT configs are single-use and ephemeral - each runner gets a unique config
-- The default runner label `rbcz-azure` is hardcoded in `init.sh` - modify as needed for your use case
 - Azure Container Apps mounts the shared volume from `$HANDOFF_DIR` to `/mnt/reg-token-store` in the runner container
-- Runners register at organization level and can service any repository in your organization
-- `RUNNER_GROUP_ID` is required and must be set explicitly
-- `GITHUB_APP_PRIVATE_KEY_PEM` must contain inline PEM content (not a file path)
+- **Runner label**: Set via `RUNNER_LABEL` environment variable (single string, not JSON)
+- **PAT-only authentication**: GitHub App authentication has been removed for simplicity
+- **Organization runners**: Require `admin:org` PAT scope and explicit `RUNNER_GROUP_ID`
+- **Repository runners**: Require `repo` PAT scope, always use runner_group_id: 1
+- **Repository discovery**: For repo scope, the init script queries GitHub API to find repositories with matching queued workflows
+- **Rate limiting**: Repository discovery can consume API rate limit - use `GITHUB_REPOS` filter to minimize API calls
+- **KEDA configuration**: KEDA determines *when* to scale but doesn't pass repository context to init containers in standard setup
 
 ## Troubleshooting
 
