@@ -1,132 +1,91 @@
 #!/usr/bin/env bash
-# Mint JIT runner config (preferred) or classic registration token for an org runner
-# Deps: bash, curl, openssl. Optional: python3 (for JSON parsing / group name lookup).
+# Generate JIT runner config for an organization-level GitHub Actions runner
+# Deps: bash, curl, openssl, jq
 set -euo pipefail
-set -x
 
 # -------- Inputs --------
 : "${GITHUB_ORG:?missing GITHUB_ORG (org login)}"
-GITHUB_PAT="${GITHUB_PAT:-}"                         # optional; if set we use PAT mode
+: "${RUNNER_GROUP_ID:?missing RUNNER_GROUP_ID (runner group ID)}"
 
-RUNNER_GROUP_NAME="${RUNNER_GROUP_NAME:-}"           # optional if RUNNER_GROUP_ID provided
-RUNNER_GROUP_ID="${RUNNER_GROUP_ID:-}"               # recommended to set explicitly for JIT
+GITHUB_PAT="${GITHUB_PAT:-}"                         # optional; if set we use PAT mode
 RUNNER_NAME="${RUNNER_NAME:-jit-$(hostname)-$RANDOM}"
-RUNNER_LABELS_JSON='["rbcz-azure"]'                  # your requested label
+RUNNER_LABELS_JSON='["rbcz-azure"]'
 HANDOFF_DIR="${HANDOFF_DIR:-/handoff}"
 API="${API:-https://api.github.com}"
 API_VERSION="2022-11-28"
 
+echo "==> Initializing GitHub Actions runner configuration"
+echo "    Organization: $GITHUB_ORG"
+echo "    Runner Group ID: $RUNNER_GROUP_ID"
+echo "    Runner Name: $RUNNER_NAME"
+echo "    Labels: $RUNNER_LABELS_JSON"
+
 # -------- Helpers --------
-have_python() { command -v python3 >/dev/null 2>&1; }
-
-# Trim helper (so spaces-only PAT is treated as empty)
-trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; printf '%s' "${s%"${s##*[![:space:]]}"}"; }
-
 json_get() {
   local key="$1"
-  if have_python; then
-    python3 -c "import sys, json
-k = sys.argv[1]
-input_data = sys.stdin.read()
-if not input_data or not input_data.strip():
-    print(f'ERROR: Empty response from API call. Check your credentials and API endpoint.', file=sys.stderr)
-    sys.exit(2)
-try:
-    d = json.loads(input_data)
-except json.JSONDecodeError as e:
-    print(f'ERROR: Invalid JSON response: {e}', file=sys.stderr)
-    print(f'Received: {input_data[:200]}', file=sys.stderr)
-    sys.exit(2)
-v = d.get(k, '')
-try:
-    print(v if not isinstance(v, (dict, list)) else json.dumps(v, separators=(',',':')))
-except Exception:
-    print(v if not isinstance(v, (dict, list)) else json.dumps(v, separators=(',',':')))" "$key"
-  else
-    echo "ERROR: python3 not found; cannot parse JSON." >&2
-    exit 2
-  fi
-}
+  local input
+  input="$(cat)"
 
-find_group_id_by_name() {
-  local name="$1"
-  if ! have_python; then
-    echo "ERROR: python3 required to resolve runner group by name; set RUNNER_GROUP_ID instead." >&2
-    exit 2
+  # Check for empty input
+  if [ -z "$input" ] || [ -z "$(printf '%s' "$input" | tr -d '[:space:]')" ]; then
+    echo "ERROR: Empty response from API call. Check your credentials and API endpoint." >&2
+    return 2
   fi
-  python3 - "$name" <<'PY'
-import sys, json
-name = sys.argv[1]
-data = json.load(sys.stdin)
-for g in data.get("runner_groups", []):
-    if g.get("name") == name:
-        print(g.get("id"))
-        sys.exit(0)
-sys.exit(3)
-PY
+
+  # Extract value with jq (raw output, empty if key doesn't exist)
+  printf '%s' "$input" | jq -r ".$key // empty" 2>/dev/null || {
+    echo "ERROR: Invalid JSON response or jq error." >&2
+    echo "Received: ${input:0:200}" >&2
+    return 2
+  }
 }
 
 b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
 
-# Accept GITHUB_APP_PRIVATE_KEY_PEM as a path or inline PEM (App mode only)
-KEY_TMP=""
-cleanup_key() {
-  if [ -n "$KEY_TMP" ]; then
-    if command -v shred >/dev/null 2>&1; then shred -u "$KEY_TMP" || rm -f "$KEY_TMP"; else rm -f "$KEY_TMP"; fi
-  fi
-}
-trap cleanup_key EXIT
-
-resolve_key_path() {
-  local val="$1"
-  # File path
-  if [ -f "$val" ]; then
-    printf '%s\n' "$val"
-    return
-  fi
-  # Inline PEM: normalize \r and literal \n
-  local pem
-  pem="$(printf '%s' "$val" | sed 's/\\r//g; s/\\n/\n/g')"
-  if ! printf '%s' "$pem" | grep -q '^-----BEGIN .*PRIVATE KEY-----'; then
-    echo "ERROR: GITHUB_APP_PRIVATE_KEY_PEM is neither a readable file nor valid PEM content." >&2
-    exit 1
-  fi
-  KEY_TMP="$(mktemp)"
-  chmod 600 "$KEY_TMP"
-  printf '%s\n' "$pem" > "$KEY_TMP"
-  printf '%s\n' "$KEY_TMP"
-}
-
 make_jwt_with_key() {
-  local key_path="$1"
-  local now iat exp header payload unsigned sig passin
+  local now iat exp header payload unsigned sig passin key_tmp
   now=$(date +%s); iat=$((now-60)); exp=$((now+540))
   header='{"alg":"RS256","typ":"JWT"}'
   payload=$(printf '{"iat":%d,"exp":%d,"iss":%d}' "$iat" "$exp" "$GITHUB_APP_ID")
   unsigned="$(printf '%s' "$header" | b64url).$(printf '%s' "$payload" | b64url)"
   passin="pass:"  # no prompt; empty passphrase by default
   if [ -n "${GITHUB_APP_KEY_PASSPHRASE:-}" ]; then passin="pass:${GITHUB_APP_KEY_PASSPHRASE}"; fi
-  sig="$(printf '%s' "$unsigned" | openssl dgst -sha256 -sign "$key_path" -passin "$passin" -binary | b64url)"
+
+  # Write PEM to temp file for signing
+  key_tmp="$(mktemp)"
+  chmod 600 "$key_tmp"
+  printf '%s\n' "$GITHUB_APP_PRIVATE_KEY_PEM" | sed 's/\\r//g; s/\\n/\n/g' > "$key_tmp"
+
+  sig="$(printf '%s' "$unsigned" | openssl dgst -sha256 -sign "$key_tmp" -passin "$passin" -binary | b64url)"
+
+  # Cleanup temp key file
+  if command -v shred >/dev/null 2>&1; then shred -u "$key_tmp" || rm -f "$key_tmp"; else rm -f "$key_tmp"; fi
+
   printf '%s.%s\n' "$unsigned" "$sig"
 }
 
 # ---------- Auth mode: PAT or GitHub App ----------
 USE_PAT=false
-if [ -n "$(trim "${GITHUB_PAT}")" ]; then
+if [ -n "${GITHUB_PAT}" ]; then
   USE_PAT=true
 fi
 
 if $USE_PAT; then
-  INSTALL_TOKEN="$(trim "${GITHUB_PAT}")"
+  echo "==> Using Personal Access Token (PAT) authentication"
+  INSTALL_TOKEN="${GITHUB_PAT}"
   # Ensure nothing later tries to touch App credentials
   unset GITHUB_APP_ID GITHUB_INSTALLATION_ID GITHUB_APP_PRIVATE_KEY_PEM GITHUB_APP_KEY_PASSPHRASE || true
 else
+  echo "==> Using GitHub App authentication"
   # App mode requires these:
   : "${GITHUB_APP_ID:?missing GITHUB_APP_ID (App ID integer)}"
   : "${GITHUB_INSTALLATION_ID:?missing GITHUB_INSTALLATION_ID}"
-  : "${GITHUB_APP_PRIVATE_KEY_PEM:?missing GITHUB_APP_PRIVATE_KEY_PEM (path OR inline PEM)}"
-  KEY_PATH="$(resolve_key_path "$GITHUB_APP_PRIVATE_KEY_PEM")"
-  JWT="$(make_jwt_with_key "$KEY_PATH")"
+  : "${GITHUB_APP_PRIVATE_KEY_PEM:?missing GITHUB_APP_PRIVATE_KEY_PEM (inline PEM)}"
+  echo "    App ID: $GITHUB_APP_ID"
+  echo "    Installation ID: $GITHUB_INSTALLATION_ID"
+  echo "==> Generating JWT for GitHub App authentication"
+  JWT="$(make_jwt_with_key)"
+  echo "==> Obtaining installation access token"
   INSTALL_TOKEN="$(
     curl -fsSL -X POST \
       -H "Accept: application/vnd.github+json" \
@@ -144,37 +103,8 @@ if [ -z "$INSTALL_TOKEN" ]; then
 fi
 auth_hdr=(-H "Accept: application/vnd.github+json" -H "Authorization: Bearer $INSTALL_TOKEN" -H "X-GitHub-Api-Version: $API_VERSION")
 
-# ---------- If no group provided, use classic org registration token (Default group) ----------
-if [ -z "${RUNNER_GROUP_ID:-}" ] && [ -z "${RUNNER_GROUP_NAME:-}" ]; then
-  REG_TOKEN="$(
-    curl -fsSL -X POST "${auth_hdr[@]}" \
-      "$API/orgs/$GITHUB_ORG/actions/runners/registration-token" \
-    | json_get token
-  )"
-  [ -n "$REG_TOKEN" ]
-  umask 077
-  printf '%s' "$REG_TOKEN" > "$HANDOFF_DIR/regtoken"
-  # Make sure the runner user can read it inside ACA (world-readable in the replica)
-  chmod 755 "$HANDOFF_DIR" || true
-  chmod 644 "$HANDOFF_DIR/regtoken" || true
-  echo "OK: wrote org reg token to $HANDOFF_DIR/regtoken (Default runner group)."
-  exit 0
-fi
-
-# ---------- Resolve runner group if a NAME was provided ----------
-if [ -z "${RUNNER_GROUP_ID:-}" ] && [ -n "${RUNNER_GROUP_NAME:-}" ]; then
-  RUNNER_GROUP_ID="$(
-    curl -fsSL "${auth_hdr[@]}" "$API/orgs/$GITHUB_ORG/actions/runner-groups" \
-    | find_group_id_by_name "$RUNNER_GROUP_NAME" || true
-  )"
-fi
-
-if [ -z "${RUNNER_GROUP_ID:-}" ]; then
-  echo "ERROR: Provide RUNNER_GROUP_ID or a valid RUNNER_GROUP_NAME (requires python3), or leave both empty to use classic org token." >&2
-  exit 1
-fi
-
-# ---------- Try JIT (single-use, preferred) ----------
+# ---------- Generate JIT config ----------
+echo "==> Generating JIT runner configuration"
 JIT_BODY=$(printf '{"name":"%s","runner_group_id":%s,"labels":%s,"work_folder":"_work"}' \
                   "$RUNNER_NAME" "$RUNNER_GROUP_ID" "$RUNNER_LABELS_JSON")
 
@@ -188,4 +118,8 @@ ENCODED_JIT="$(printf '%s' "$JIT_RESP" | json_get encoded_jit_config)"
 
 umask 077
 printf '%s' "$ENCODED_JIT" > "$HANDOFF_DIR/jit"
-echo "OK: wrote JIT config to $HANDOFF_DIR/jit for runner '$RUNNER_NAME' in group $RUNNER_GROUP_ID (labels: $RUNNER_LABELS_JSON)."
+echo "==> Successfully created JIT configuration"
+echo "    Written to: $HANDOFF_DIR/jit"
+echo "    Runner: $RUNNER_NAME"
+echo "    Group ID: $RUNNER_GROUP_ID"
+echo "    Labels: $RUNNER_LABELS_JSON"

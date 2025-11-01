@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is a tutorial repository for deploying self-hosted GitHub Actions runners on Azure Container Apps jobs. The repository demonstrates a two-container pattern:
 
-1. **Init Container** (`Dockerfile.init`) - Handles authentication and generates JIT (Just-In-Time) runner configurations or registration tokens
+1. **Init Container** (`Dockerfile.init`) - Handles authentication and generates JIT (Just-In-Time) runner configurations
 2. **Runner Container** (`Dockerfile.github`) - Executes the actual GitHub Actions workflows
 
 See the [official tutorial](https://learn.microsoft.com/azure/container-apps/tutorial-ci-cd-runners-jobs) for deployment context.
@@ -17,7 +17,7 @@ See the [official tutorial](https://learn.microsoft.com/azure/container-apps/tut
 
 - **`Dockerfile.init`** - Init container that runs `init.sh` to generate runner credentials
   - Base: `ghcr.io/actions/actions-runner:2.329.0`
-  - Installs: curl, openssl, python3, ca-certificates
+  - Installs: curl, openssl, jq, ca-certificates
   - Entrypoint: `/init.sh`
   - Runs as `runner` user
 
@@ -34,10 +34,12 @@ See the [official tutorial](https://learn.microsoft.com/azure/container-apps/tut
   - Supports both GitHub PAT and GitHub App authentication
   - Generates JIT config exclusively (no classic registration tokens)
   - Writes JIT config to `/handoff` directory (default) for the runner container
+  - Uses jq for JSON parsing (clean and efficient)
+  - Structured logging with clear progress indicators
   - Environment variables:
-    - Required: `GITHUB_ORG` (organization login)
-    - Auth mode: `GITHUB_PAT` (Personal Access Token) or `GITHUB_APP_ID` + `GITHUB_INSTALLATION_ID` + `GITHUB_APP_PRIVATE_KEY_PEM`
-    - Optional: `RUNNER_GROUP_ID` (defaults to 1), `RUNNER_GROUP_NAME`, `RUNNER_NAME`, `RUNNER_LABELS_JSON`, `HANDOFF_DIR`, `API` (defaults to https://api.github.com)
+    - Required: `GITHUB_ORG` (organization login), `RUNNER_GROUP_ID` (runner group ID)
+    - Auth mode: `GITHUB_PAT` (Personal Access Token) or `GITHUB_APP_ID` + `GITHUB_INSTALLATION_ID` + `GITHUB_APP_PRIVATE_KEY_PEM` (inline PEM content)
+    - Optional: `RUNNER_NAME`, `RUNNER_LABELS_JSON`, `HANDOFF_DIR`, `API` (defaults to https://api.github.com)
   - Default label: `["rbcz-azure"]` (hardcoded)
 
 - **`entrypoint.sh`** - Runner startup script
@@ -50,8 +52,8 @@ See the [official tutorial](https://learn.microsoft.com/azure/container-apps/tut
 
 1. **Init container** runs first:
    - Authenticates with GitHub API (PAT or App)
-   - Calls GitHub API to generate JIT config or registration token
-   - Writes credential file to shared volume at `$HANDOFF_DIR`
+   - Calls GitHub API to generate JIT config
+   - Writes JIT config file to shared volume at `$HANDOFF_DIR`
 
 2. **Runner container** starts after init succeeds:
    - Reads credential from shared volume (mounted at `/mnt/reg-token-store/`)
@@ -70,15 +72,15 @@ Both modes generate JIT config exclusively - no fallback to classic registration
 ### Runner Scope
 
 - **Organization-level only**: Runners appear in org settings and can service any repository in the organization
-- Can use custom runner groups via `RUNNER_GROUP_ID` or `RUNNER_GROUP_NAME` (defaults to group 1)
+- Must specify runner group via `RUNNER_GROUP_ID` (required parameter)
 
 ### Configuration for Azure Container Apps
 
 When deploying with Azure Container Apps and KEDA's GitHub Runner scaler:
 
 1. **Set `GITHUB_ORG`** (required) - Your GitHub organization login
-2. **Set `RUNNER_GROUP_ID`** (optional) - Organize runners by group (defaults to 1)
-3. **Set `GITHUB_PAT`** - Personal Access Token with appropriate permissions
+2. **Set `RUNNER_GROUP_ID`** (required) - Runner group ID to organize runners
+3. **Set `GITHUB_PAT`** (required) - Personal Access Token with appropriate permissions
 
 **Why organization-level?**
 - KEDA scalers determine *when* to scale based on workflow queue depth
@@ -142,17 +144,20 @@ docker build -f Dockerfile.github -t <registry>/github-runner:latest .
 To test the init script locally:
 
 ```bash
-# With default runner group (ID: 1)
+# With PAT authentication
 docker run --rm \
   -e GITHUB_ORG=myorg \
   -e GITHUB_PAT=ghp_xxx \
+  -e RUNNER_GROUP_ID=7 \
   -v /tmp/handoff:/handoff \
   <registry>/runner-init:latest
 
-# With custom runner group
+# With GitHub App authentication
 docker run --rm \
   -e GITHUB_ORG=myorg \
-  -e GITHUB_PAT=ghp_xxx \
+  -e GITHUB_APP_ID=123456 \
+  -e GITHUB_INSTALLATION_ID=789012 \
+  -e GITHUB_APP_PRIVATE_KEY_PEM="-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----" \
   -e RUNNER_GROUP_ID=7 \
   -v /tmp/handoff:/handoff \
   <registry>/runner-init:latest
@@ -177,7 +182,8 @@ docker run --rm \
 - The default runner label `rbcz-azure` is hardcoded in `init.sh` - modify as needed for your use case
 - Azure Container Apps mounts the shared volume from `$HANDOFF_DIR` to `/mnt/reg-token-store` in the runner container
 - Runners register at organization level and can service any repository in your organization
-- Use `RUNNER_GROUP_ID` to organize runners (defaults to 1 if not specified)
+- `RUNNER_GROUP_ID` is required and must be set explicitly
+- `GITHUB_APP_PRIVATE_KEY_PEM` must contain inline PEM content (not a file path)
 
 ## Troubleshooting
 
@@ -196,9 +202,3 @@ sed -i 's/\r$//' github-actions-runner/entrypoint.sh
 **Problem:** Cannot modify permissions on `/mnt/reg-token-store` or `HANDOFF_DIR`
 
 **Solution:** These directories are mounted by Azure Container Apps and should NOT have permissions modified by the init script. The `umask` setting in init.sh is sufficient for file permissions. Do not use `chmod` on the mounted directory.
-
-### Python JSON Parsing Errors
-
-**Problem:** `ERROR: Empty response from API call` but runner is registered
-
-**Solution:** Check the script exit code (`echo $?`). If it's 0, the script succeeded despite stderr messages. The current implementation uses `python3 -c` which may show cosmetic errors but works correctly.
