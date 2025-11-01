@@ -119,7 +119,7 @@ See `ARCHITECTURE.md` for detailed technical explanation of KEDA scaler design.
 **Azure Container Registry:** `jklrbacaacr.azurecr.io`
 
 **Current versions:**
-- Init container: **22.0**
+- Init container: **23.0**
 - Runner container: **9.0**
 
 (Increment by 1 for each build)
@@ -139,7 +139,7 @@ git push origin main
 # 2. Then: Build init container (increment version number for each build)
 az acr build \
     --registry "jklrbacaacr" \
-    --image "github-actions-init:23.0" \
+    --image "github-actions-init:24.0" \
     --file "Dockerfile.init" \
     "https://github.com/jakub-klapka/container-apps-ci-cd-runner-tutorial.git"
 
