@@ -4,11 +4,17 @@ FROM ghcr.io/actions/actions-runner:2.329.0
 USER root
 
 # install curl and jq
-RUN apt-get update && apt-get install -y curl jq && \
+RUN apt-get update && apt-get install -y curl jq gnupg software-properties-common lsb-release && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
 RUN curl -sL https://aka.ms/InstallAzureCLIDeb | bash
+
+RUN curl -fsSL https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp.gpg && \
+    echo "deb [signed-by=/usr/share/keyrings/hashicorp.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" > /etc/apt/sources.list.d/hashicorp.list && \
+    apt-get update && apt-get install -y terraform && \
+    apt-get clean && rm -rf /var/lib/apt/lists/* && \
+    terraform -version
 
 COPY github-actions-runner/entrypoint.sh ./entrypoint.sh
 RUN chmod +x ./entrypoint.sh
