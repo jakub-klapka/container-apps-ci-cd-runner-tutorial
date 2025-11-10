@@ -23,7 +23,7 @@ See the [official tutorial](https://learn.microsoft.com/azure/container-apps/tut
 
 - **`Dockerfile.github`** - Main runner container that executes workflows
   - Base: `ghcr.io/actions/actions-runner:2.329.0`
-  - Installs: curl, jq, Azure CLI
+  - Installs: curl, jq, Azure CLI, Terraform
   - Entrypoint: `entrypoint.sh`
   - Runs as `runner` user
 
@@ -120,7 +120,7 @@ See `ARCHITECTURE.md` for detailed technical explanation of KEDA scaler design.
 
 **Current versions:**
 - Init container: **23.0**
-- Runner container: **9.0**
+- Runner container: **10.0**
 
 (Increment by 1 for each build)
 
