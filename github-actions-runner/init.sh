@@ -1,16 +1,35 @@
-#!/usr/bin/env bash
+#!/bin/bash
+#
+# Generates JIT (Just-In-Time) configuration for GitHub Actions self-hosted runners.
+# Supports org-level or repo-level runners. In repo mode, discovers target repository
+# by scanning for queued workflow jobs matching the specified RUNNER_LABEL.
+# Authenticates via GitHub PAT and writes encoded JIT config to handoff directory.
+#
 # Generate JIT runner config for GitHub Actions runners (org or repo level)
 # Deps: bash, curl, jq
 set -euo pipefail
 
 # -------- Inputs --------
+# Runner scope: 'org' for organization-level or 'repo' for repository-level runner
 RUNNER_SCOPE="${RUNNER_SCOPE:-org}"
+# GitHub organization name (required for both org and repo modes)
+# GITHUB_ORG=your-org-name
+# GitHub Personal Access Token with repo permissions (Actions: read, Administration: read/write)
 : "${GITHUB_PAT:?missing GITHUB_PAT}"
+# Custom label to identify and match queued workflow jobs (e.g., 'custom-label')
 : "${RUNNER_LABEL:?missing RUNNER_LABEL (custom label string)}"
+# Name for the runner instance (auto-generated if not specified)
 RUNNER_NAME="${RUNNER_NAME:-jit-$(hostname)-$RANDOM}"
-HANDOFF_DIR="${HANDOFF_DIR:-/handoff}"
+# Directory to write the JIT config file
+HANDOFF_DIR="${HANDOFF_DIR:-/mnt/jit-token-store}"
+# GitHub API endpoint URL
 API="${API:-https://api.github.com}"
+# GitHub API version for request headers
 API_VERSION="2022-11-28"
+# Optional: comma-separated list of repo names to scan in repo mode (scans all if not set)
+# GITHUB_REPOS=repo1,repo2,repo3
+# Optional: runner group ID for org mode (required for org-level runners)
+# RUNNER_GROUP_ID=123
 
 # Validate scope
 if [ "$RUNNER_SCOPE" != "org" ] && [ "$RUNNER_SCOPE" != "repo" ]; then
@@ -19,34 +38,18 @@ if [ "$RUNNER_SCOPE" != "org" ] && [ "$RUNNER_SCOPE" != "repo" ]; then
 fi
 
 # Mode-specific validation
+# Organization name (required for both org and repo modes)
+: "${GITHUB_ORG:?missing GITHUB_ORG (organization name)}"
+
 if [ "$RUNNER_SCOPE" = "org" ]; then
-  : "${GITHUB_ORG:?missing GITHUB_ORG (organization name)}"
+  # Runner group ID from GitHub org settings (required for org-level runners)
   : "${RUNNER_GROUP_ID:?missing RUNNER_GROUP_ID (runner group ID)}"
 else
-  : "${GITHUB_OWNER:?missing GITHUB_OWNER (owner/org name)}"
-  RUNNER_GROUP_ID=1  # Always 1 for repo runners
+  # For repo runners, always use group ID 1 (default group)
+  RUNNER_GROUP_ID=1
 fi
 
 # -------- Helpers --------
-json_get() {
-  local key="$1"
-  local input
-  input="$(cat)"
-
-  # Check for empty input
-  if [ -z "$input" ] || [ -z "$(printf '%s' "$input" | tr -d '[:space:]')" ]; then
-    echo "ERROR: Empty response from API call. Check your credentials and API endpoint." >&2
-    return 2
-  fi
-
-  # Extract value with jq (raw output, empty if key doesn't exist)
-  printf '%s' "$input" | jq -r ".$key // empty" 2>/dev/null || {
-    echo "ERROR: Invalid JSON response or jq error." >&2
-    echo "Received: ${input:0:200}" >&2
-    return 2
-  }
-}
-
 check_rate_limit() {
   local response
   response=$(curl -fsSL \
@@ -85,7 +88,7 @@ list_repositories() {
 
     # Extract repos for the target owner
     local page_repos
-    page_repos=$(echo "$response" | jq -r ".[] | select(.owner.login == \"$GITHUB_OWNER\") | .name")
+    page_repos=$(echo "$response" | jq -r ".[] | select(.owner.login == \"$GITHUB_ORG\") | .name")
 
     # Add matching repos if any (page might have no matches)
     if [ -n "$page_repos" ]; then
@@ -115,7 +118,7 @@ get_queued_runs() {
     -H "Accept: application/vnd.github+json" \
     -H "Authorization: Bearer $GITHUB_PAT" \
     -H "X-GitHub-Api-Version: $API_VERSION" \
-    "$API/repos/$GITHUB_OWNER/$repo/actions/runs?status=queued&per_page=100" \
+    "$API/repos/$GITHUB_ORG/$repo/actions/runs?status=queued&per_page=100" \
     | jq -r '.workflow_runs[]?.id // empty'
 }
 
@@ -126,7 +129,7 @@ get_job_labels() {
     -H "Accept: application/vnd.github+json" \
     -H "Authorization: Bearer $GITHUB_PAT" \
     -H "X-GitHub-Api-Version: $API_VERSION" \
-    "$API/repos/$GITHUB_OWNER/$repo/actions/runs/$run_id/jobs?per_page=100" \
+    "$API/repos/$GITHUB_ORG/$repo/actions/runs/$run_id/jobs?per_page=100" \
     | jq -r '.jobs[]? | select(.status == "queued") | .labels[]? // empty'
 }
 
@@ -137,13 +140,13 @@ find_matching_repo() {
   repos=$(list_repositories)
 
   if [ -z "$repos" ]; then
-    echo "ERROR: No repositories found for owner '$GITHUB_OWNER'" >&2
+    echo "ERROR: No repositories found for organization '$GITHUB_ORG'" >&2
     return 1
   fi
 
   while IFS= read -r repo; do
     [ -z "$repo" ] && continue
-    echo "    Checking $GITHUB_OWNER/$repo..." >&2
+    echo "    Checking $GITHUB_ORG/$repo..." >&2
 
     local runs
     runs=$(get_queued_runs "$repo")
@@ -181,11 +184,11 @@ echo "    Scope: $RUNNER_SCOPE"
 echo "    Label: $RUNNER_LABEL"
 echo "    Runner Name: $RUNNER_NAME"
 
+echo "    Organization: $GITHUB_ORG"
+
 if [ "$RUNNER_SCOPE" = "org" ]; then
-  echo "    Organization: $GITHUB_ORG"
   echo "    Runner Group ID: $RUNNER_GROUP_ID"
 else
-  echo "    Owner: $GITHUB_OWNER"
   if [ -n "${GITHUB_REPOS:-}" ]; then
     echo "    Target Repos: $GITHUB_REPOS"
   else
@@ -207,16 +210,17 @@ if [ "$RUNNER_SCOPE" = "repo" ]; then
     exit 1
   fi
 
-  echo "==> Selected repository: $GITHUB_OWNER/$GITHUB_REPO"
+  echo "==> Selected repository: $GITHUB_ORG/$GITHUB_REPO"
 fi
 
 # -------- Generate JIT config --------
 echo "==> Generating JIT runner configuration"
 
 if [ "$RUNNER_SCOPE" = "org" ]; then
+  check_rate_limit
   JIT_ENDPOINT="$API/orgs/$GITHUB_ORG/actions/runners/generate-jitconfig"
 else
-  JIT_ENDPOINT="$API/repos/$GITHUB_OWNER/$GITHUB_REPO/actions/runners/generate-jitconfig"
+  JIT_ENDPOINT="$API/repos/$GITHUB_ORG/$GITHUB_REPO/actions/runners/generate-jitconfig"
 fi
 
 JIT_BODY=$(printf '{"name":"%s","runner_group_id":%s,"labels":["%s"],"work_folder":"_work"}' \
@@ -245,7 +249,7 @@ if [ "$RUNNER_SCOPE" = "org" ]; then
   echo "    Organization: $GITHUB_ORG"
   echo "    Group ID: $RUNNER_GROUP_ID"
 else
-  echo "    Repository: $GITHUB_OWNER/$GITHUB_REPO"
+  echo "    Repository: $GITHUB_ORG/$GITHUB_REPO"
 fi
 echo "    Runner: $RUNNER_NAME"
 echo "    Label: $RUNNER_LABEL"
