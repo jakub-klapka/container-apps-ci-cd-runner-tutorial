@@ -16,12 +16,12 @@ RUNNER_SCOPE="${RUNNER_SCOPE:-org}"
 # GITHUB_ORG=your-org-name
 # GitHub Personal Access Token with repo permissions (Actions: read, Administration: read/write)
 : "${GITHUB_PAT:?missing GITHUB_PAT}"
-# Custom label to identify and match queued workflow jobs (e.g., 'custom-label')
+# Custom label to identify and match queued workflow jobs (e.g., 'cz-azure')
 : "${RUNNER_LABEL:?missing RUNNER_LABEL (custom label string)}"
 # Name for the runner instance (auto-generated if not specified)
 RUNNER_NAME="${RUNNER_NAME:-jit-$(hostname)-$RANDOM}"
-# Directory to write the JIT config file
-HANDOFF_DIR="${HANDOFF_DIR:-/mnt/jit-token-store}"
+# Full path to write the JIT config file (including filename)
+JIT_TOKEN_PATH="${JIT_TOKEN_PATH:-/mnt/jit-token-store/jit}"
 # GitHub API endpoint URL
 API="${API:-https://api.github.com}"
 # GitHub API version for request headers
@@ -241,10 +241,10 @@ ENCODED_JIT=$(echo "$JIT_RESP" | jq -r '.encoded_jit_config // empty')
 }
 
 umask 077
-printf '%s' "$ENCODED_JIT" > "$HANDOFF_DIR/jit"
+printf '%s' "$ENCODED_JIT" > "$JIT_TOKEN_PATH"
 
 echo "==> Successfully created JIT configuration"
-echo "    Written to: $HANDOFF_DIR/jit"
+echo "    Written to: $JIT_TOKEN_PATH"
 if [ "$RUNNER_SCOPE" = "org" ]; then
   echo "    Organization: $GITHUB_ORG"
   echo "    Group ID: $RUNNER_GROUP_ID"

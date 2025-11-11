@@ -1,7 +1,13 @@
 #!/bin/bash
+#
+# Entrypoint script for GitHub Actions self-hosted runner container.
+# Configures Kafka logging for operational monitoring, reads JIT configuration
+# from init container, and starts the GitHub Actions runner.
+#
 set -euo pipefail
 
 JIT_TOKEN_PATH="${JIT_TOKEN_PATH:-/mnt/jit-token-store/jit}"
+
 
 # Entrypoint logic
 
