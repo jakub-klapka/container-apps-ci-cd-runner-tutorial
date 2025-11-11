@@ -16,17 +16,17 @@ RUNNER_SCOPE="${RUNNER_SCOPE:-org}"
 # GITHUB_ORG=your-org-name
 # GitHub Personal Access Token with repo permissions (Actions: read, Administration: read/write)
 : "${GITHUB_PAT:?missing GITHUB_PAT}"
-# Custom label to identify and match queued workflow jobs (e.g., 'cz-azure')
+# Custom label to identify and match queued workflow jobs (e.g., 'azure')
 : "${RUNNER_LABEL:?missing RUNNER_LABEL (custom label string)}"
 # Name for the runner instance (auto-generated if not specified)
-RUNNER_NAME="${RUNNER_NAME:-jit-$(hostname)-$RANDOM}"
+RUNNER_NAME="${RUNNER_NAME:-jit-$( { command -v hostname >/dev/null && hostname || cat /etc/hostname 2>/dev/null || uname -n; } )-$RANDOM}"
 # Full path to write the JIT config file (including filename)
 JIT_TOKEN_PATH="${JIT_TOKEN_PATH:-/mnt/jit-token-store/jit}"
 # GitHub API endpoint URL
 API="${API:-https://api.github.com}"
 # GitHub API version for request headers
 API_VERSION="2022-11-28"
-# Optional: comma-separated list of repo names to scan in repo mode (scans all if not set)
+# Required: comma-separated list of repository names to check for queued jobs
 # GITHUB_REPOS=repo1,repo2,repo3
 # Optional: runner group ID for org mode (required for org-level runners)
 # RUNNER_GROUP_ID=123
@@ -40,6 +40,8 @@ fi
 # Mode-specific validation
 # Organization name (required for both org and repo modes)
 : "${GITHUB_ORG:?missing GITHUB_ORG (organization name)}"
+# Repository list (required for both org and repo modes)
+: "${GITHUB_REPOS:?missing GITHUB_REPOS (comma-separated list of repository names)}"
 
 if [ "$RUNNER_SCOPE" = "org" ]; then
   # Runner group ID from GitHub org settings (required for org-level runners)
@@ -69,49 +71,6 @@ check_rate_limit() {
   fi
 }
 
-list_repositories() {
-  local page=1
-  local all_repos=""
-
-  while true; do
-    local response
-    response=$(curl -fsSL \
-      -H "Accept: application/vnd.github+json" \
-      -H "Authorization: Bearer $GITHUB_PAT" \
-      -H "X-GitHub-Api-Version: $API_VERSION" \
-      "$API/user/repos?visibility=all&per_page=100&page=$page")
-
-    # Check if we got any results
-    local count
-    count=$(echo "$response" | jq '. | length')
-    [ "$count" -eq 0 ] && break
-
-    # Extract repos for the target owner
-    local page_repos
-    page_repos=$(echo "$response" | jq -r ".[] | select(.owner.login == \"$GITHUB_ORG\") | .name")
-
-    # Add matching repos if any (page might have no matches)
-    if [ -n "$page_repos" ]; then
-      all_repos="$all_repos$page_repos"$'\n'
-    fi
-
-    # Continue if we got full page (means more might exist)
-    [ "$count" -lt 100 ] && break
-
-    page=$((page + 1))
-  done
-
-  # Filter by GITHUB_REPOS if specified
-  if [ -n "${GITHUB_REPOS:-}" ]; then
-    # Convert comma-separated list to newline-separated and trim spaces
-    local filter_list
-    filter_list=$(echo "$GITHUB_REPOS" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    echo "$all_repos" | grep -Fx -f <(echo "$filter_list")
-  else
-    echo "$all_repos"
-  fi
-}
-
 get_queued_runs() {
   local repo="$1"
   curl -fsSL \
@@ -136,11 +95,12 @@ get_job_labels() {
 find_matching_repo() {
   echo "==> Discovering repository with matching queued jobs" >&2
 
+  # Parse GITHUB_REPOS: convert comma-separated to newline-separated and trim spaces
   local repos
-  repos=$(list_repositories)
+  repos=$(echo "$GITHUB_REPOS" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
   if [ -z "$repos" ]; then
-    echo "ERROR: No repositories found for organization '$GITHUB_ORG'" >&2
+    echo "ERROR: GITHUB_REPOS is empty after parsing" >&2
     return 1
   fi
 
@@ -185,15 +145,10 @@ echo "    Label: $RUNNER_LABEL"
 echo "    Runner Name: $RUNNER_NAME"
 
 echo "    Organization: $GITHUB_ORG"
+echo "    Target Repos: $GITHUB_REPOS"
 
 if [ "$RUNNER_SCOPE" = "org" ]; then
   echo "    Runner Group ID: $RUNNER_GROUP_ID"
-else
-  if [ -n "${GITHUB_REPOS:-}" ]; then
-    echo "    Target Repos: $GITHUB_REPOS"
-  else
-    echo "    Target Repos: all accessible repos"
-  fi
 fi
 
 echo "==> Using Personal Access Token (PAT) authentication"
